@@ -222,6 +222,7 @@ pub fn transcode(
      -> Result<(), PipelineError> {
         // find a surface the encoder is done with
         let mut tries = 0;
+        let stall_deadline = Instant::now() + std::time::Duration::from_secs(10);
         let surface = loop {
             let s = pool[next_slot % ENCODER_POOL].clone();
             if !encoder.surface_busy(&s) {
@@ -232,11 +233,19 @@ pub fn transcode(
             tries += 1;
             if tries >= ENCODER_POOL {
                 // everything in flight: pull encoder output until something frees up
+                trace(|| "all encoder surfaces busy; pulling encoder output".into());
                 match encoder.pull()? {
                     Some(p) => sink(p, muxer, pending, written)?,
                     None => std::thread::sleep(std::time::Duration::from_millis(1)),
                 }
                 tries = 0;
+                if Instant::now() > stall_deadline {
+                    return Err(PipelineError::Other(format!(
+                        "encoder never released an input surface for 10 s ({} in flight) — \
+                         the MFT keeps references to input samples longer than expected",
+                        encoder.in_flight_len()
+                    )));
+                }
             }
         };
         let mut target = backend.surface_frame(&surface, out_color);
