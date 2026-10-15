@@ -1,0 +1,32 @@
+{
+  "schema": 1,
+  "date_utc": "2026-10-15T15:10:53Z",
+  "tool": "onchip",
+  "tool_version": "0.1.0",
+  "fixture": "fixture_bars_1080p_nv12",
+  "graph": "scale-overlay",
+  "frames": 150,
+  "wall_seconds": 1.2426862,
+  "fps": 120.70625713876922,
+  "ms_per_frame": 8.284574666666668,
+  "adapter": {
+    "name": "AMD Radeon(TM) Graphics",
+    "backend": "Dx12",
+    "device_type": "IntegratedGpu",
+    "driver": "32.0.21037.3009",
+    "driver_info": "",
+    "vendor": 4098,
+    "device": 5761,
+    "unified_memory": true,
+    "texture_format_16bit_norm": true,
+    "texture_format_nv12": true,
+    "texture_format_p010": true
+  },
+  "notes": [
+    "full path: demux + HW decode + GPU graph + HW encode + mux",
+    "encoder settings: 2000000 bit/s CBR, GOP 60, no B-frames, High (1280x720)",
+    "decoder=Microsoft H264 Video Decoder MFT (D3D11VA via DXGI device manager) (sync)",
+    "encoder=AMDh264Encoder (async)",
+    "plan B: GPU copy into shared surface"
+  ]
+}

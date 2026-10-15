@@ -1,0 +1,30 @@
+{
+  "schema": 1,
+  "date_utc": "2026-10-15T15:11:30Z",
+  "tool": "ffmpeg-cpu",
+  "tool_version": "ffmpeg version 9.0.2-full_build-www.gyan.dev Copyright (c) 2000-2026 the FFmpeg developers",
+  "fixture": "fixture_bars_1080p_nv12",
+  "graph": "scale-overlay",
+  "frames": 150,
+  "wall_seconds": 0.7471517,
+  "fps": 200.76244221889613,
+  "ms_per_frame": 4.981011333333333,
+  "adapter": {
+    "name": "AMD Radeon(TM) Graphics",
+    "backend": "Dx12",
+    "device_type": "IntegratedGpu",
+    "driver": "32.0.21037.3009",
+    "driver_info": "",
+    "vendor": 4098,
+    "device": 5761,
+    "unified_memory": true,
+    "texture_format_16bit_norm": true,
+    "texture_format_nv12": true,
+    "texture_format_p010": true
+  },
+  "notes": [
+    "encoder=h264_mf",
+    "same encoder settings as onchip: 20000000 bit/s CBR, GOP 60, no B-frames, High",
+    "\"ffmpeg\" \"-hide_banner\" \"-loglevel\" \"error\" \"-y\" \"-benchmark\" \"-i\" \"C:\\\\Users\\\\seventhwell-011\\\\onchip\\\\bench\\\\fixtures\\\\fixture_bars_1080p_nv12.mp4\" \"-i\" \"C:\\\\Users\\\\seventhwell-011\\\\onchip\\\\bench\\\\fixtures\\\\logo_sample.png\" \"-filter_complex\" \"[0:v]scale=1280:720:flags=lanczos[v0];[1:v]format=rgba,colorchannelmixer=aa=0.9[ov];[v0][ov]overlay=32:32[v1]\" \"-map\" \"[v1]\" \"-an\" \"-c:v\" \"h264_mf\" \"-b:v\" \"20000000\" \"-g\" \"60\" \"-bf\" \"0\" \"-profile:v\" \"100\" \"-rate_control\" \"cbr\" \"-pix_fmt\" \"yuv420p\" \"C:\\\\Users\\\\seventhwell-011\\\\Desktop\\\\onchip-1080-20m.ffmpeg.mp4\""
+  ]
+}
