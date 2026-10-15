@@ -1,26 +1,56 @@
-//! M1-1 interop proof of concept (Windows only). See docs/DESIGN.md §4.2 and the M1
-//! section of ROADMAP.md. Steps, in order:
+//! M1-1 interop proof of concept (Windows only): run one H.264 file through
+//! MF decode → shared NV12 surface → wgpu (identity graph) → shared NV12 surface →
+//! MF encode → mp4, and print which interop plan the decoder took.
 //!
-//!  1. Create a D3D11 device, register it with an `IMFDXGIDeviceManager`.
-//!  2. Enumerate a hardware H.264 decoder MFT, hand it the device manager
-//!     (`MFT_MESSAGE_SET_D3D_MANAGER`), decode one frame, get its `ID3D11Texture2D` (NV12).
-//!  3. Plan A: if the MFT accepts caller-provided output samples, allocate the output
-//!     texture with `D3D11_RESOURCE_MISC_SHARED_NTHANDLE`, `CreateSharedHandle`, and open
-//!     it on the D3D12 device with `OpenSharedHandle` — zero copy.
-//!  4. Plan B: otherwise `CopySubresourceRegion` into a shared texture inside D3D11 (a
-//!     GPU-side copy, still on-chip), then open that on D3D12.
-//!  5. Sync with a shared fence (`ID3D11Device5::CreateFence(D3D11_FENCE_FLAG_SHARED)` /
-//!     `ID3D12Device::OpenSharedHandle`).
-//!  6. Wrap the D3D12 texture as a `wgpu::Texture` via `wgpu-hal`'s dx12 backend.
-//!  7. Run yuv2rgb → rgb2yuv (identity) into a D3D12-owned shared NV12 texture.
-//!  8. Open it on D3D11, wrap it in an `IMFSample`, push it through a hardware encoder
-//!     MFT, write the Annex B stream to a file.
-//!  9. Capture with PIX and confirm no `Map` / `ReadFromSubresource` / readback-heap copy.
-//! 10. Record plan A/B outcome and API versions in docs/INTEROP-WIN.md.
+//! Usage: cargo run --release -p onchip-backend-win --example interop_poc -- in.mp4 out.mp4
 //!
-//! Until M1 lands this binary only states that.
+//! Capture this run with PIX to prove there is no readback (docs/INTEROP-WIN.md).
 
+#[cfg(not(target_os = "windows"))]
 fn main() {
-    eprintln!("interop_poc: not implemented yet (M1, ROADMAP RM-001). See the module docs.");
+    eprintln!("interop_poc only runs on Windows");
     std::process::exit(3);
+}
+
+#[cfg(target_os = "windows")]
+fn main() {
+    use onchip_core::GpuContext;
+    use onchip_core::backend::Codec;
+    use onchip_core::job::Job;
+
+    let args: Vec<String> = std::env::args().collect();
+    if args.len() < 3 {
+        eprintln!("usage: interop_poc <in.mp4> <out.mp4> [WxH]");
+        std::process::exit(2);
+    }
+    let scale = args.get(3).and_then(|s| {
+        let (w, h) = s.split_once('x')?;
+        Some((
+            w.parse().ok()?,
+            h.parse().ok()?,
+            onchip_core::job::ScaleFilter::Lanczos3,
+        ))
+    });
+    let job = Job::shorthand(&args[1], &args[2], Codec::H264, scale, None);
+    let ctx = match GpuContext::new(None) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("GPU: {e}");
+            std::process::exit(3);
+        }
+    };
+    eprintln!("adapter: {} ({})", ctx.info.name, ctx.info.backend);
+    match onchip_backend_win::pipeline::transcode(ctx, &job, |n| {
+        if n % 30 == 0 {
+            eprintln!("  {n} frames");
+        }
+    }) {
+        Ok(report) => {
+            println!("{}", serde_json::to_string_pretty(&report).expect("json"));
+        }
+        Err(e) => {
+            eprintln!("interop_poc failed: {e}");
+            std::process::exit(3);
+        }
+    }
 }

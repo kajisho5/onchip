@@ -77,6 +77,15 @@ impl GpuContext {
         if has_16bit_norm {
             required_features |= wgpu::Features::TEXTURE_FORMAT_16BIT_NORM;
         }
+        // Multi-planar formats: needed to wrap decoder / encoder surfaces (D3D12, Vulkan).
+        let has_nv12 = adapter_features.contains(wgpu::Features::TEXTURE_FORMAT_NV12);
+        if has_nv12 {
+            required_features |= wgpu::Features::TEXTURE_FORMAT_NV12;
+        }
+        let has_p010 = adapter_features.contains(wgpu::Features::TEXTURE_FORMAT_P010);
+        if has_p010 {
+            required_features |= wgpu::Features::TEXTURE_FORMAT_P010;
+        }
 
         let limits = adapter.limits();
         let device_desc = wgpu::DeviceDescriptor {
@@ -106,6 +115,8 @@ impl GpuContext {
             device: ai.device,
             unified_memory,
             texture_format_16bit_norm: has_16bit_norm,
+            texture_format_nv12: has_nv12,
+            texture_format_p010: has_p010,
         };
 
         Ok(Arc::new(GpuContext {
@@ -119,6 +130,11 @@ impl GpuContext {
 
     pub fn supports_p010(&self) -> bool {
         self.info.texture_format_16bit_norm
+    }
+
+    /// Whether multi-planar NV12 textures (decoder / encoder surface imports) are usable.
+    pub fn supports_nv12_textures(&self) -> bool {
+        self.info.texture_format_nv12
     }
 }
 

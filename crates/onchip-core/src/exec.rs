@@ -10,7 +10,7 @@ use std::sync::Arc;
 use bytemuck::{Pod, Zeroable};
 
 use crate::color::{CodedRange, ColorSpec};
-use crate::frame::{GpuFrame, NativeHandle, PixelFormat};
+use crate::frame::{GpuFrame, NativeHandle, PixelFormat, PlaneSet};
 use crate::gpu::{self, GpuContext, GpuError, Pipelines};
 use crate::graph::Graph;
 use crate::job::Op;
@@ -419,10 +419,53 @@ impl Executor {
         self.frames_done
     }
 
+    /// Allocate an output frame of the right size and format, with planes stored as
+    /// separate textures. Used by `run_frame`; backends that own the encoder surface
+    /// supply their own frame to `run_frame_into` instead.
+    pub fn alloc_output_frame(&self) -> GpuFrame {
+        let device = &self.ctx.device;
+        let fmts = self.src_format.plane_formats();
+        let usage = wgpu::TextureUsages::COPY_DST
+            | wgpu::TextureUsages::COPY_SRC
+            | wgpu::TextureUsages::TEXTURE_BINDING;
+        let out_y = gpu::create_texture(device, "out.y", self.out_w, self.out_h, fmts[0], usage);
+        let out_uv = gpu::create_texture(
+            device,
+            "out.uv",
+            self.out_w.div_ceil(2),
+            self.out_h.div_ceil(2),
+            fmts[1],
+            usage,
+        );
+        GpuFrame {
+            planes: PlaneSet::Separate(vec![out_y, out_uv]),
+            format: self.src_format,
+            color: self.graph.output_color,
+            width: self.out_w,
+            height: self.out_h,
+            pts: 0,
+            native: NativeHandle::None,
+        }
+    }
+
     /// Run the graph on one frame. Returns the output frame as bi-planar textures that
     /// an encoder (or the PNG stand-in sink) can consume. Nothing in here reads back
     /// to the CPU.
     pub fn run_frame(&mut self, input: &GpuFrame) -> Result<GpuFrame, ExecError> {
+        let mut out = self.alloc_output_frame();
+        self.run_frame_into(input, &mut out)?;
+        Ok(out)
+    }
+
+    /// Run the graph on one frame, writing the result into `output` — typically a
+    /// frame whose texture is an imported encoder surface (D3D12 shared NV12, ...).
+    /// `output` must have the executor's output size and format; its `pts` and `color`
+    /// are set from the input / graph.
+    pub fn run_frame_into(
+        &mut self,
+        input: &GpuFrame,
+        output: &mut GpuFrame,
+    ) -> Result<(), ExecError> {
         if input.format != self.src_format {
             return Err(ExecError::FormatMismatch {
                 got: input.format,
@@ -437,33 +480,24 @@ impl Executor {
                 h: self.src_h,
             });
         }
+        if output.format != self.src_format {
+            return Err(ExecError::FormatMismatch {
+                got: output.format,
+                expected: self.src_format,
+            });
+        }
+        if output.width != self.out_w || output.height != self.out_h {
+            return Err(ExecError::SizeMismatch {
+                got_w: output.width,
+                got_h: output.height,
+                w: self.out_w,
+                h: self.out_h,
+            });
+        }
         let device = &self.ctx.device;
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("onchip frame"),
         });
-
-        // Output planes for this frame.
-        let out_formats = self.src_format.plane_formats();
-        let out_y = gpu::create_texture(
-            device,
-            "out.y",
-            self.out_w,
-            self.out_h,
-            out_formats[0],
-            wgpu::TextureUsages::COPY_DST
-                | wgpu::TextureUsages::COPY_SRC
-                | wgpu::TextureUsages::TEXTURE_BINDING,
-        );
-        let out_uv = gpu::create_texture(
-            device,
-            "out.uv",
-            self.out_w.div_ceil(2),
-            self.out_h.div_ceil(2),
-            out_formats[1],
-            wgpu::TextureUsages::COPY_DST
-                | wgpu::TextureUsages::COPY_SRC
-                | wgpu::TextureUsages::TEXTURE_BINDING,
-        );
 
         let view_of = |id: &str| -> wgpu::TextureView {
             match &self.res[id] {
@@ -601,49 +635,36 @@ impl Executor {
                         8,
                     );
 
-                    // GPU -> GPU copy of the packed planes into the output textures.
-                    encoder.copy_buffer_to_texture(
-                        wgpu::TexelCopyBufferInfo {
-                            buffer: y_buf,
-                            layout: wgpu::TexelCopyBufferLayout {
-                                offset: 0,
-                                bytes_per_row: Some(*y_stride),
-                                rows_per_image: None,
+                    // GPU -> GPU copy of the packed planes into the output planes.
+                    for (plane, (buf, stride)) in [(y_buf, y_stride), (uv_buf, uv_stride)]
+                        .into_iter()
+                        .enumerate()
+                    {
+                        let (tex, aspect) = output.plane_copy_target(plane);
+                        let (pw, ph) = output.plane_size(plane);
+                        encoder.copy_buffer_to_texture(
+                            wgpu::TexelCopyBufferInfo {
+                                buffer: buf,
+                                layout: wgpu::TexelCopyBufferLayout {
+                                    offset: 0,
+                                    bytes_per_row: Some(*stride),
+                                    rows_per_image: None,
+                                },
                             },
-                        },
-                        wgpu::TexelCopyTextureInfo {
-                            texture: &out_y,
-                            mip_level: 0,
-                            origin: wgpu::Origin3d::ZERO,
-                            aspect: wgpu::TextureAspect::All,
-                        },
-                        wgpu::Extent3d {
-                            width: *width,
-                            height: *height,
-                            depth_or_array_layers: 1,
-                        },
-                    );
-                    encoder.copy_buffer_to_texture(
-                        wgpu::TexelCopyBufferInfo {
-                            buffer: uv_buf,
-                            layout: wgpu::TexelCopyBufferLayout {
-                                offset: 0,
-                                bytes_per_row: Some(*uv_stride),
-                                rows_per_image: None,
+                            wgpu::TexelCopyTextureInfo {
+                                texture: tex,
+                                mip_level: 0,
+                                origin: wgpu::Origin3d::ZERO,
+                                aspect,
                             },
-                        },
-                        wgpu::TexelCopyTextureInfo {
-                            texture: &out_uv,
-                            mip_level: 0,
-                            origin: wgpu::Origin3d::ZERO,
-                            aspect: wgpu::TextureAspect::All,
-                        },
-                        wgpu::Extent3d {
-                            width: width.div_ceil(2),
-                            height: height.div_ceil(2),
-                            depth_or_array_layers: 1,
-                        },
-                    );
+                            wgpu::Extent3d {
+                                width: pw,
+                                height: ph,
+                                depth_or_array_layers: 1,
+                            },
+                        );
+                    }
+                    debug_assert_eq!((*width, *height), (self.out_w, self.out_h));
                 }
                 (op, _) => unreachable!("resource/op mismatch for {id} ({})", op.name()),
             }
@@ -651,16 +672,9 @@ impl Executor {
 
         self.ctx.queue.submit([encoder.finish()]);
         self.frames_done += 1;
-
-        Ok(GpuFrame {
-            planes: vec![out_y, out_uv],
-            format: self.src_format,
-            color: self.graph.output_color,
-            width: self.out_w,
-            height: self.out_h,
-            pts: input.pts,
-            native: NativeHandle::None,
-        })
+        output.pts = input.pts;
+        output.color = self.graph.output_color;
+        Ok(())
     }
 
     pub fn context(&self) -> &Arc<GpuContext> {

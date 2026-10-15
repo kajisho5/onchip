@@ -42,7 +42,7 @@ impl PixelFormat {
         }
     }
 
-    /// wgpu formats of each plane.
+    /// wgpu formats of each plane when the planes are separate textures.
     pub fn plane_formats(self) -> Vec<wgpu::TextureFormat> {
         match self {
             PixelFormat::Nv12 => vec![wgpu::TextureFormat::R8Unorm, wgpu::TextureFormat::Rg8Unorm],
@@ -53,6 +53,16 @@ impl PixelFormat {
                 ]
             }
             PixelFormat::Rgba16Float => vec![wgpu::TextureFormat::Rgba16Float],
+        }
+    }
+
+    /// wgpu multi-planar format when both planes live in one texture (D3D12 / Vulkan
+    /// imports). `None` for formats that have no interleaved representation.
+    pub fn interleaved_format(self) -> Option<wgpu::TextureFormat> {
+        match self {
+            PixelFormat::Nv12 => Some(wgpu::TextureFormat::NV12),
+            PixelFormat::P010 => Some(wgpu::TextureFormat::P010),
+            PixelFormat::Rgba16Float => None,
         }
     }
 }
@@ -75,11 +85,21 @@ impl std::fmt::Debug for NativeHandle {
     }
 }
 
+/// How the planes of a frame are stored.
+#[derive(Debug)]
+pub enum PlaneSet {
+    /// One `wgpu::Texture` per plane (`[Y, CbCr]` for NV12 / P010).
+    Separate(Vec<wgpu::Texture>),
+    /// One multi-planar texture (`TextureFormat::NV12` / `P010`); planes are addressed
+    /// with `TextureAspect::Plane0` / `Plane1`. This is what a D3D12 or Vulkan import
+    /// of a decoder / encoder surface looks like.
+    Interleaved(wgpu::Texture),
+}
+
 /// A frame whose pixels live in GPU-accessible memory.
 #[derive(Debug)]
 pub struct GpuFrame {
-    /// One `wgpu::Texture` per plane. NV12 / P010 have `[Y, CbCr]`.
-    pub planes: Vec<wgpu::Texture>,
+    pub planes: PlaneSet,
     pub format: PixelFormat,
     pub color: ColorSpec,
     pub width: u32,
@@ -91,7 +111,56 @@ pub struct GpuFrame {
 }
 
 impl GpuFrame {
+    /// A sampled view of plane `idx` with that plane's single-plane format
+    /// (`R8Unorm` for Y, `Rg8Unorm` for CbCr, ...), whichever way the planes are stored.
     pub fn plane_view(&self, idx: usize) -> wgpu::TextureView {
-        self.planes[idx].create_view(&wgpu::TextureViewDescriptor::default())
+        match &self.planes {
+            PlaneSet::Separate(planes) => {
+                planes[idx].create_view(&wgpu::TextureViewDescriptor::default())
+            }
+            PlaneSet::Interleaved(tex) => {
+                let aspect = plane_aspect(idx);
+                tex.create_view(&wgpu::TextureViewDescriptor {
+                    label: None,
+                    format: Some(self.format.plane_formats()[idx]),
+                    dimension: Some(wgpu::TextureViewDimension::D2),
+                    usage: None,
+                    aspect,
+                    base_mip_level: 0,
+                    mip_level_count: None,
+                    base_array_layer: 0,
+                    array_layer_count: None,
+                })
+            }
+        }
+    }
+
+    /// Where to copy plane `idx` into (texture + aspect), for `copy_buffer_to_texture`.
+    pub fn plane_copy_target(&self, idx: usize) -> (&wgpu::Texture, wgpu::TextureAspect) {
+        match &self.planes {
+            PlaneSet::Separate(planes) => (&planes[idx], wgpu::TextureAspect::All),
+            PlaneSet::Interleaved(tex) => (tex, plane_aspect(idx)),
+        }
+    }
+
+    /// Size in texels of plane `idx` (chroma planes of 4:2:0 are half size).
+    pub fn plane_size(&self, idx: usize) -> (u32, u32) {
+        if idx == 0 || !self.format.is_biplanar_yuv() {
+            (self.width, self.height)
+        } else {
+            (self.width.div_ceil(2), self.height.div_ceil(2))
+        }
+    }
+
+    pub fn plane_count(&self) -> usize {
+        self.format.plane_formats().len()
+    }
+}
+
+pub fn plane_aspect(idx: usize) -> wgpu::TextureAspect {
+    match idx {
+        0 => wgpu::TextureAspect::Plane0,
+        1 => wgpu::TextureAspect::Plane1,
+        _ => wgpu::TextureAspect::Plane2,
     }
 }

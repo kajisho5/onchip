@@ -1,10 +1,12 @@
 //! Windows backend: Media Foundation hardware MFTs with D3D12 zero-copy import/export.
 //!
-//! M0 ships the probe (hardware MFT enumeration). The decode → D3D12 → encode path is
-//! M1 (`ROADMAP.md` RM-001..RM-010); its interop PoC lives in `examples/interop_poc.rs`.
+//! M0 shipped the probe (hardware MFT enumeration). M1 adds the decode → D3D12 →
+//! encode path: `d3d` (device pair, shared surfaces, fence), `mft` (transform driver),
+//! `decoder`, `encoder`, and [`WinBackend`]. The `interop_poc` example exercises the
+//! whole path on one file and prints which interop plan was taken.
 
 use onchip_core::GpuContext;
-use onchip_core::backend::{BackendError, BackendInfo};
+use onchip_core::backend::BackendInfo;
 
 /// Name reported by `onchip probe`.
 pub const NAME: &str = "mediafoundation+d3d12";
@@ -19,13 +21,6 @@ pub fn backend_info(ctx: &GpuContext) -> BackendInfo {
     }
 }
 
-/// Placeholder until M1.
-pub fn open() -> Result<(), BackendError> {
-    Err(BackendError::Unavailable(
-        "Windows decode/encode path lands in M1",
-    ))
-}
-
 #[cfg(not(target_os = "windows"))]
 pub fn enumerate_hw_codecs(
     _ctx: &GpuContext,
@@ -36,8 +31,101 @@ pub fn enumerate_hw_codecs(
     (Vec::new(), Vec::new())
 }
 
+/// Open the backend. Only works on Windows with wgpu on D3D12.
+#[cfg(not(target_os = "windows"))]
+pub fn open(_ctx: std::sync::Arc<GpuContext>) -> Result<(), onchip_core::backend::BackendError> {
+    Err(onchip_core::backend::BackendError::Unavailable(
+        "the Windows backend only runs on Windows",
+    ))
+}
+
 #[cfg(target_os = "windows")]
 pub use mf::enumerate_hw_codecs;
+
+#[cfg(target_os = "windows")]
+pub mod d3d;
+#[cfg(target_os = "windows")]
+pub mod decoder;
+#[cfg(target_os = "windows")]
+pub mod encoder;
+#[cfg(target_os = "windows")]
+pub mod mft;
+#[cfg(target_os = "windows")]
+pub mod pipeline;
+
+#[cfg(target_os = "windows")]
+pub use backend::{WinBackend, open};
+
+#[cfg(target_os = "windows")]
+mod backend {
+    use std::sync::Arc;
+
+    use onchip_core::backend::{
+        BackendError, BackendInfo, EncoderConfig, StreamInfo, VideoBackend,
+    };
+    use onchip_core::frame::GpuFrame;
+    use onchip_core::{ColorSpec, GpuContext};
+    use windows::Win32::Media::MediaFoundation::{MF_VERSION, MFSTARTUP_NOSOCKET, MFStartup};
+
+    use crate::d3d::{D3dShared, SharedSurface, SurfaceRole};
+    use crate::decoder::WinDecoder;
+    use crate::encoder::WinEncoder;
+
+    pub struct WinBackend {
+        pub ctx: Arc<GpuContext>,
+        pub d3d: Arc<D3dShared>,
+    }
+
+    /// Start Media Foundation and build the D3D11 side next to wgpu's D3D12 device.
+    pub fn open(ctx: Arc<GpuContext>) -> Result<WinBackend, BackendError> {
+        // SAFETY: MFStartup may be called more than once per process; it is reference counted.
+        unsafe { MFStartup(MF_VERSION, MFSTARTUP_NOSOCKET) }
+            .map_err(|e| crate::d3d::werr("MFStartup", e))?;
+        let d3d = D3dShared::new(ctx.clone())?;
+        Ok(WinBackend { ctx, d3d })
+    }
+
+    impl WinBackend {
+        /// A fresh shared surface the executor can render into and the encoder can read.
+        pub fn alloc_encoder_surface(
+            &self,
+            width: u32,
+            height: u32,
+        ) -> Result<Arc<SharedSurface>, BackendError> {
+            self.d3d
+                .create_shared_surface(width, height, SurfaceRole::EncoderInput)
+        }
+
+        pub fn surface_frame(&self, surface: &Arc<SharedSurface>, color: ColorSpec) -> GpuFrame {
+            surface.frame(color, 0, None)
+        }
+
+        pub fn open_decoder_with_rate(
+            &self,
+            stream: &StreamInfo,
+            framerate: (u32, u32),
+        ) -> Result<WinDecoder, BackendError> {
+            WinDecoder::open(self.d3d.clone(), stream, framerate)
+        }
+    }
+
+    impl VideoBackend for WinBackend {
+        type Decoder = WinDecoder;
+        type Encoder = WinEncoder;
+
+        fn probe(&self) -> BackendInfo {
+            crate::backend_info(&self.ctx)
+        }
+
+        fn open_decoder(&self, stream: &StreamInfo) -> Result<WinDecoder, BackendError> {
+            WinDecoder::open(self.d3d.clone(), stream, (30, 1))
+        }
+
+        fn open_encoder(&self, cfg: &EncoderConfig) -> Result<WinEncoder, BackendError> {
+            WinEncoder::open(self.d3d.clone(), cfg)
+        }
+    }
+}
 
 #[cfg(target_os = "windows")]
 mod mf {
@@ -45,22 +133,21 @@ mod mf {
     use onchip_core::backend::{Codec, CodecInfo};
     use onchip_core::frame::PixelFormat;
     use windows::Win32::Media::MediaFoundation::{
-        IMFActivate, MF_VERSION, MFMediaType_Video, MFSTARTUP_NOSOCKET, MFShutdown, MFStartup,
-        MFT_CATEGORY_VIDEO_DECODER, MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_FLAG,
-        MFT_ENUM_FLAG_HARDWARE, MFT_ENUM_FLAG_SORTANDFILTER, MFT_FRIENDLY_NAME_Attribute,
-        MFT_REGISTER_TYPE_INFO, MFTEnumEx, MFVideoFormat_H264, MFVideoFormat_HEVC,
-        MFVideoFormat_NV12, MFVideoFormat_P010,
+        MF_VERSION, MFMediaType_Video, MFSTARTUP_NOSOCKET, MFShutdown, MFStartup,
+        MFT_CATEGORY_VIDEO_DECODER, MFT_CATEGORY_VIDEO_ENCODER, MFT_REGISTER_TYPE_INFO,
+        MFVideoFormat_H264, MFVideoFormat_HEVC, MFVideoFormat_NV12, MFVideoFormat_P010,
     };
-    use windows::Win32::System::Com::CoTaskMemFree;
-    use windows::core::{GUID, PWSTR};
+    use windows::core::GUID;
+
+    use crate::mft::enumerate_hw;
 
     /// Enumerate hardware video decoder / encoder MFTs for H.264 and HEVC.
     ///
     /// Facts about what this does and does not prove: an MFT being registered as
     /// hardware means the vendor's driver exposes it; it does not guarantee it accepts
-    /// D3D11 textures or P010. That is checked when the MFT is actually opened (M1).
+    /// D3D11 textures or P010. That is checked when the MFT is actually opened.
     pub fn enumerate_hw_codecs(_ctx: &GpuContext) -> (Vec<CodecInfo>, Vec<CodecInfo>) {
-        // SAFETY: MFStartup/MFShutdown are balanced; MF is re-entrant per thread.
+        // SAFETY: MFStartup/MFShutdown are balanced; MF is reference counted per process.
         let started = unsafe { MFStartup(MF_VERSION, MFSTARTUP_NOSOCKET) }.is_ok();
         let mut decoders = Vec::new();
         let mut encoders = Vec::new();
@@ -68,29 +155,27 @@ mod mf {
             (Codec::H264, MFVideoFormat_H264),
             (Codec::Hevc, MFVideoFormat_HEVC),
         ] {
-            // decoders: input = compressed, output = anything
-            let input = MFT_REGISTER_TYPE_INFO {
+            let compressed = MFT_REGISTER_TYPE_INFO {
                 guidMajorType: MFMediaType_Video,
                 guidSubtype: guid,
             };
-            for name in enumerate(&MFT_CATEGORY_VIDEO_DECODER, Some(&input), None) {
-                decoders.push(CodecInfo {
-                    codec,
-                    name,
-                    formats: probe_formats(&MFT_CATEGORY_VIDEO_DECODER, &input, true),
-                });
+            if let Ok(list) = enumerate_hw(&MFT_CATEGORY_VIDEO_DECODER, Some(&compressed), None) {
+                for (name, _) in list {
+                    decoders.push(CodecInfo {
+                        codec,
+                        name,
+                        formats: probe_formats(&MFT_CATEGORY_VIDEO_DECODER, &compressed, true),
+                    });
+                }
             }
-            // encoders: input = anything, output = compressed
-            let output = MFT_REGISTER_TYPE_INFO {
-                guidMajorType: MFMediaType_Video,
-                guidSubtype: guid,
-            };
-            for name in enumerate(&MFT_CATEGORY_VIDEO_ENCODER, None, Some(&output)) {
-                encoders.push(CodecInfo {
-                    codec,
-                    name,
-                    formats: probe_formats(&MFT_CATEGORY_VIDEO_ENCODER, &output, false),
-                });
+            if let Ok(list) = enumerate_hw(&MFT_CATEGORY_VIDEO_ENCODER, None, Some(&compressed)) {
+                for (name, _) in list {
+                    encoders.push(CodecInfo {
+                        codec,
+                        name,
+                        formats: probe_formats(&MFT_CATEGORY_VIDEO_ENCODER, &compressed, false),
+                    });
+                }
             }
         }
         if started {
@@ -100,8 +185,6 @@ mod mf {
         (decoders, encoders)
     }
 
-    /// Which of NV12 / P010 the hardware MFT registers for this codec. `is_decoder`
-    /// selects whether the uncompressed side is the output (decoder) or input (encoder).
     fn probe_formats(
         category: &GUID,
         compressed: &MFT_REGISTER_TYPE_INFO,
@@ -117,66 +200,18 @@ mod mf {
                 guidSubtype: guid,
             };
             let found = if is_decoder {
-                !enumerate(category, Some(compressed), Some(&raw)).is_empty()
+                enumerate_hw(category, Some(compressed), Some(&raw))
+                    .map(|l| !l.is_empty())
+                    .unwrap_or(false)
             } else {
-                !enumerate(category, Some(&raw), Some(compressed)).is_empty()
+                enumerate_hw(category, Some(&raw), Some(compressed))
+                    .map(|l| !l.is_empty())
+                    .unwrap_or(false)
             };
             if found {
                 out.push(fmt);
             }
         }
         out
-    }
-
-    fn enumerate(
-        category: &GUID,
-        input: Option<&MFT_REGISTER_TYPE_INFO>,
-        output: Option<&MFT_REGISTER_TYPE_INFO>,
-    ) -> Vec<String> {
-        let mut activates: *mut Option<IMFActivate> = std::ptr::null_mut();
-        let mut count: u32 = 0;
-        let flags: MFT_ENUM_FLAG = MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_SORTANDFILTER;
-        // SAFETY: out-pointers are valid for the call; the returned array is freed below.
-        let hr = unsafe {
-            MFTEnumEx(
-                *category,
-                flags,
-                input.map(|p| p as *const _),
-                output.map(|p| p as *const _),
-                &mut activates,
-                &mut count,
-            )
-        };
-        if hr.is_err() || activates.is_null() {
-            return Vec::new();
-        }
-        let mut names = Vec::with_capacity(count as usize);
-        for i in 0..count as usize {
-            // SAFETY: `activates` holds `count` entries allocated by MFTEnumEx.
-            let slot = unsafe { &mut *activates.add(i) };
-            if let Some(act) = slot.take() {
-                names.push(friendly_name(&act).unwrap_or_else(|| format!("<unnamed MFT #{i}>")));
-                drop(act);
-            }
-        }
-        // SAFETY: the array was allocated with CoTaskMemAlloc by MFTEnumEx.
-        unsafe { CoTaskMemFree(Some(activates as *const _)) };
-        names
-    }
-
-    fn friendly_name(act: &IMFActivate) -> Option<String> {
-        let mut pw = PWSTR::null();
-        let mut len: u32 = 0;
-        // SAFETY: GetAllocatedString allocates with CoTaskMemAlloc; freed below.
-        let ok = unsafe { act.GetAllocatedString(&MFT_FRIENDLY_NAME_Attribute, &mut pw, &mut len) }
-            .is_ok();
-        if !ok || pw.is_null() {
-            return None;
-        }
-        // SAFETY: `pw` is a valid NUL-terminated wide string of `len` characters.
-        let s = unsafe { pw.to_string() }.ok();
-        // SAFETY: allocated by GetAllocatedString.
-        unsafe { CoTaskMemFree(Some(pw.as_ptr() as *const _)) };
-        s
     }
 }

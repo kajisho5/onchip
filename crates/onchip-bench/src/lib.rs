@@ -8,8 +8,12 @@ use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 
+pub mod ffmpeg;
+
 #[derive(Debug, thiserror::Error)]
 pub enum BenchError {
+    #[error("external tool: {0}")]
+    Tool(String),
     #[error("{path}: {source}")]
     Io {
         path: PathBuf,
@@ -254,6 +258,8 @@ mod tests {
                 device: 0,
                 unified_memory: false,
                 texture_format_16bit_norm: true,
+                texture_format_nv12: true,
+                texture_format_p010: false,
             },
             notes: vec![],
         };

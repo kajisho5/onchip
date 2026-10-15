@@ -12,17 +12,21 @@ labelled `milestone:Mx`. Run `scripts/create-roadmap-issues.sh` once after cloni
 - [x] `onchip run` in PNG-sequence mode
 - [x] GPU tests behind `#[ignore]`, CPU tests in CI
 
-## M1 — Windows on-chip path
-- [ ] RM-001 interop PoC: MF HW decoder → D3D11 texture → D3D12 (plan A shared NT handle / plan B GPU copy) → wgpu
-- [ ] RM-002 shared fence sync D3D11 ⇄ D3D12
-- [ ] RM-003 wrap D3D12 texture as `wgpu::Texture` via `wgpu-hal`
-- [ ] RM-004 export: D3D12 NV12 → D3D11 → `IMFSample` → HW encoder MFT
-- [ ] RM-005 minimal mp4 demuxer (no Source Reader)
-- [ ] RM-006 minimal mp4 muxer
-- [ ] RM-007 `WinBackend` implementing `VideoBackend`
+## M1 — Windows on-chip path (code written, hardware run pending)
+- [x] RM-001 interop code: MF decoder → D3D11 texture → D3D12 (plan A shared NT handle / plan B GPU copy) → wgpu — **unverified on hardware**
+- [x] RM-002a shared fence sync D3D11 ⇄ D3D12 (CPU-side wait)
+- [ ] RM-002 GPU-side waits instead of CPU waits
+- [x] RM-003 wrap D3D12 texture as `wgpu::Texture` via `wgpu-hal` (NV12, plane views)
+- [x] RM-004 export: wgpu → shared NV12 → `IMFSample` → HW encoder MFT
+- [x] RM-005 mp4 demuxer (`mp4` crate, no Source Reader) — verified vs ffprobe
+- [x] RM-006 mp4 muxer — verified with ffmpeg decode
+- [x] RM-007 `WinBackend` implementing `VideoBackend`
 - [ ] RM-008 PIX capture proving zero readback (`docs/img/pix-m1.png`)
-- [ ] RM-009 `docs/INTEROP-WIN.md` with plan A/B outcome, API versions, references
-- [ ] RM-010 bench skeleton: `bench/fixtures/gen.py`, `onchip bench`, `onchip verify` (PSNR/SSIM)
+- [ ] RM-009 `docs/INTEROP-WIN.md` outcome section from a real run
+- [x] RM-010 bench skeleton: `bench/fixtures/gen.py`, `onchip bench --against ffmpeg`, `onchip verify` on mp4 (PSNR; SSIM is M3)
+- [ ] RM-011 HEVC: parse `hvcC` ourselves (the `mp4` crate drops it), HEVC decoder/encoder MFTs
+- [ ] RM-012 allow B-frames: use `MFSampleExtension_DecodeTimestamp` for dts, negative ctts in the muxer
+- [ ] RM-013 P010 (10-bit) surfaces and MFT types
 
 ## M2 — macOS on-chip path
 - [ ] RM-020 VideoToolbox decode → `CVMetalTextureCache` → `MTLTexture` → wgpu

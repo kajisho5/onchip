@@ -17,7 +17,7 @@ on both throughput **and** color accuracy? See [`docs/DESIGN.md`](docs/DESIGN.md
 | Milestone | Scope | Status |
 |---|---|---|
 | M0 | Workspace, CI, job parser, filter graph, WGSL filters (scale / overlay / color), `onchip probe` | ✅ done |
-| M1 | **Windows**: Media Foundation decode → D3D12 → Media Foundation encode, on-chip proof via PIX | ⬜ not started |
+| M1 | **Windows**: Media Foundation decode → D3D12 → Media Foundation encode, on-chip proof via PIX | 🟡 code complete, not yet run on hardware ([docs/VERIFICATION-M1.md](docs/VERIFICATION-M1.md)) |
 | M2 | **macOS**: VideoToolbox decode → Metal → VideoToolbox encode, on-chip proof via Instruments | ⬜ not started |
 | M3 | Color management: BT.2020 PQ, full/limited range, `onchip verify` ΔE2000 | ⬜ not started |
 | M4 | Public benchmarks vs FFmpeg (wins and losses alike) | ⬜ not started |
@@ -32,17 +32,21 @@ are small and may pass through the CPU for demux/mux.
 On Apple Silicon there is no discrete GPU memory at all — memory is unified. onchip
 therefore talks about *GPU-accessible memory*, never "VRAM".
 
-## Usage (M0: PNG-sequence mode)
+## Usage
 
 ```sh
 onchip probe                       # GPU adapter, backend, hardware codecs
 onchip probe --json                # same, machine-readable
 onchip run job.json                # run a declarative filter graph
-onchip run in/ -o out/ --scale 1920x1080 --overlay logo_sample.png@32,32
+onchip run in/ -o out/ --scale 1920x1080 --overlay logo_sample.png@32,32          # PNG sequence (any OS)
+onchip run in.mp4 -o out.mp4 --codec h264 --scale 1920x1080 --overlay logo_sample.png@32,32   # Windows
+onchip bench job.json --against ffmpeg --ffmpeg-encoder h264_mf                   # same input & filters, FFmpeg CPU path
+onchip verify out.mp4 --ref ffmpeg_out.mp4                                        # PSNR (FFmpeg decodes both)
 ```
 
-Until M1 lands, `source`/`sink` read and write PNG sequences. The graph, shaders and
-color pipeline are the real thing; only the codec ends are stand-ins.
+With codec `png`, `source`/`sink` read and write PNG sequences on any OS. With codec
+`h264` on Windows the full on-chip path runs: hardware decode → GPU graph → hardware
+encode. macOS (VideoToolbox) is M2.
 
 A job file:
 

@@ -36,9 +36,9 @@ enum Cmd {
     Probe(ProbeArgs),
     /// Run a job file or a scale/overlay shorthand
     Run(RunArgs),
-    /// Time a job (onchip only until M1-3; `--against ffmpeg` arrives with the Windows path)
+    /// Time a job, optionally against FFmpeg on the same input and filters
     Bench(BenchArgs),
-    /// Compare two PNG sequences (PSNR). SSIM / ΔE2000 arrive in M3
+    /// Compare two outputs (PNG sequences or video files) by PSNR. SSIM / ΔE2000 arrive in M3
     Verify(VerifyArgs),
 }
 
@@ -56,7 +56,7 @@ struct RunArgs {
     /// Output path (shorthand form only)
     #[arg(short, long)]
     output: Option<PathBuf>,
-    /// Output codec (shorthand form only). Only `png` works until M1.
+    /// Output codec (shorthand form only). `png` everywhere; `h264` on Windows (M1)
     #[arg(long, default_value = "png")]
     codec: CodecArg,
     /// Scale to WIDTHxHEIGHT, e.g. 1920x1080
@@ -89,12 +89,22 @@ struct BenchArgs {
     /// Name recorded as `fixture` in the result (defaults to the input file stem)
     #[arg(long)]
     fixture: Option<String>,
-    /// Name recorded as `graph` in the result
-    #[arg(long, default_value = "custom")]
+    /// Name recorded as `graph` in the result (`auto` derives it from the job)
+    #[arg(long, default_value = "auto")]
     graph: String,
-    /// Compare against another tool. Only `ffmpeg` is planned; not implemented until M1-3
+    /// Compare against another tool (`ffmpeg`): same input, same filters, FFmpeg's CPU
+    /// filter path, encoded with --ffmpeg-encoder
     #[arg(long)]
     against: Option<String>,
+    /// FFmpeg binary
+    #[arg(long, default_value = "ffmpeg")]
+    ffmpeg: String,
+    /// FFmpeg video encoder for the baseline (`h264_mf`, `h264_nvenc`, `h264_videotoolbox`, `libx264`)
+    #[arg(long, default_value = "h264_mf")]
+    ffmpeg_encoder: String,
+    /// FFmpeg `-hwaccel` for the baseline's decode (`d3d11va`, `cuda`, `videotoolbox`); filters stay on the CPU
+    #[arg(long)]
+    ffmpeg_hwaccel: Option<String>,
     /// Directory for the result JSON
     #[arg(long, default_value = "bench/results")]
     out_dir: PathBuf,
@@ -112,6 +122,9 @@ struct VerifyArgs {
     min_psnr: Option<f64>,
     #[arg(long)]
     json: bool,
+    /// FFmpeg binary used to decode video inputs to frames
+    #[arg(long, default_value = "ffmpeg")]
+    ffmpeg: String,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -244,6 +257,10 @@ fn probe(a: ProbeArgs) -> Result<u8, Exit> {
             "unavailable"
         }
     );
+    println!(
+        "nv12 textures  {}  (needed to share decoder/encoder surfaces with wgpu)",
+        if ad.texture_format_nv12 { "yes" } else { "no" }
+    );
     print_codecs("hw decoders", &info.hw_decoders);
     print_codecs("hw encoders", &info.hw_encoders);
     Ok(0)
@@ -364,11 +381,7 @@ fn run(a: RunArgs) -> Result<u8, Exit> {
     let graph = Graph::build(&job, color).map_err(input_err)?;
 
     if job.output.codec != Codec::Png {
-        return Err(backend_err(anyhow!(
-            "codec {:?} needs the platform backend, which lands in M1 (Windows) / M2 (macOS). \
-             Use codec `png` with a PNG sequence until then.",
-            job.output.codec
-        )));
+        return run_video(&job, graph, a.quiet);
     }
 
     let ctx = gpu()?;
@@ -416,30 +429,200 @@ fn run(a: RunArgs) -> Result<u8, Exit> {
     Ok(0)
 }
 
-fn bench(a: BenchArgs) -> Result<u8, Exit> {
-    if let Some(tool) = &a.against {
-        return Err(backend_err(anyhow!(
-            "--against {tool} is not implemented yet (M1-3, ROADMAP RM-010). \
-             Run without --against to time onchip alone."
-        )));
+/// mp4 in → platform backend → mp4 out. Windows only until M2.
+#[cfg(target_os = "windows")]
+fn run_video(job: &Job, _graph: Graph, quiet: bool) -> Result<u8, Exit> {
+    let ctx = gpu()?;
+    if !quiet {
+        eprintln!(
+            "onchip: {} -> {} on {} ({})",
+            job.input, job.output.path, ctx.info.name, ctx.info.backend
+        );
     }
+    let report = onchip_backend_win::pipeline::transcode(ctx, job, |n| {
+        if !quiet && n % 60 == 0 {
+            eprintln!("  {n} frames");
+        }
+    })
+    .map_err(backend_err)?;
+    if !quiet {
+        eprintln!(
+            "onchip: {} frames in {:.3}s ({:.1} fps)  decoder={} ({})  encoder={} ({})  {}",
+            report.frames_encoded,
+            report.seconds,
+            report.fps,
+            report.decoder_mft,
+            if report.decoder_async {
+                "async"
+            } else {
+                "sync"
+            },
+            report.encoder_mft,
+            if report.encoder_async {
+                "async"
+            } else {
+                "sync"
+            },
+            report.interop
+        );
+        for n in &report.encoder_notes {
+            eprintln!("  encoder note: {n}");
+        }
+    }
+    Ok(0)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn run_video(job: &Job, _graph: Graph, _quiet: bool) -> Result<u8, Exit> {
+    Err(backend_err(anyhow!(
+        "codec {:?} needs the platform backend: Windows (M1) is implemented, macOS lands in M2. \
+         On this OS use codec `png` with a PNG sequence.",
+        job.output.codec
+    )))
+}
+
+fn bench(a: BenchArgs) -> Result<u8, Exit> {
     if a.runs == 0 {
         return Err(input_err(anyhow!("--runs must be >= 1")));
+    }
+    if let Some(tool) = &a.against
+        && tool != "ffmpeg"
+    {
+        return Err(input_err(anyhow!(
+            "--against only knows `ffmpeg`, got {tool:?}"
+        )));
     }
     let text = std::fs::read_to_string(&a.job)
         .with_context(|| format!("reading {}", a.job.display()))
         .map_err(input_err)?;
     let job = Job::from_json(&text).map_err(input_err)?;
-    if job.output.codec != Codec::Png {
-        return Err(backend_err(anyhow!(
-            "bench only supports the PNG path until M1"
-        )));
-    }
-    let color = ColorSpec::BT709_LIMITED;
+    let spec = onchip_bench::ffmpeg::FilterSpec::from_job(&job);
+    let graph_name = if a.graph == "auto" {
+        spec.graph_name()
+    } else {
+        a.graph.clone()
+    };
+    let fixture = a.fixture.clone().unwrap_or_else(|| {
+        Path::new(&job.input)
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or("input".into())
+    });
     let ctx = gpu()?;
+    let mut results = Vec::new();
+
+    // ---- onchip ----
+    let (frames, seconds, notes) = match job.output.codec {
+        Codec::Png => bench_png(&ctx, &job, a.runs)?,
+        _ => bench_video(&ctx, &job, a.runs)?,
+    };
+    results.push(onchip_bench::BenchResult {
+        schema: onchip_bench::BenchResult::SCHEMA,
+        date_utc: onchip_bench::now_utc(),
+        tool: "onchip".into(),
+        tool_version: onchip_core::VERSION.into(),
+        fixture: fixture.clone(),
+        graph: graph_name.clone(),
+        frames,
+        wall_seconds: seconds,
+        fps: if seconds > 0.0 {
+            frames as f64 / seconds
+        } else {
+            0.0
+        },
+        ms_per_frame: if frames > 0 {
+            seconds * 1000.0 / frames as f64
+        } else {
+            0.0
+        },
+        cpu_percent: None,
+        adapter: ctx.info.clone(),
+        notes,
+    });
+
+    // ---- ffmpeg baseline ----
+    if a.against.is_some() {
+        if job.output.codec == Codec::Png {
+            return Err(input_err(anyhow!(
+                "--against ffmpeg needs a video job (codec h264)"
+            )));
+        }
+        let out = Path::new(&job.output.path).with_extension("ffmpeg.mp4");
+        let bitrate = job.output.bitrate_bps().map_err(input_err)?;
+        let mut best: Option<onchip_bench::ffmpeg::FfmpegRun> = None;
+        for run in 0..a.runs {
+            let r = onchip_bench::ffmpeg::run_ffmpeg_cpu_filters(
+                &a.ffmpeg,
+                Path::new(&job.input),
+                &out,
+                &spec,
+                &a.ffmpeg_encoder,
+                bitrate,
+                a.ffmpeg_hwaccel.as_deref(),
+            )
+            .map_err(backend_err)?;
+            eprintln!(
+                "ffmpeg run {}/{}: {} frames, {:.3}s, {:.1} fps",
+                run + 1,
+                a.runs,
+                r.frames,
+                r.seconds,
+                r.frames as f64 / r.seconds.max(1e-9)
+            );
+            if best.as_ref().is_none_or(|b| r.seconds < b.seconds) {
+                best = Some(r);
+            }
+        }
+        let r = best.expect("at least one run");
+        results.push(onchip_bench::BenchResult {
+            schema: onchip_bench::BenchResult::SCHEMA,
+            date_utc: onchip_bench::now_utc(),
+            tool: if a.ffmpeg_hwaccel.is_some() {
+                "ffmpeg-hwdec-cpufilter".into()
+            } else {
+                "ffmpeg-cpu".into()
+            },
+            tool_version: r.ffmpeg_version.clone(),
+            fixture,
+            graph: graph_name,
+            frames: r.frames,
+            wall_seconds: r.seconds,
+            fps: r.frames as f64 / r.seconds.max(1e-9),
+            ms_per_frame: r.seconds * 1000.0 / r.frames.max(1) as f64,
+            cpu_percent: None,
+            adapter: ctx.info.clone(),
+            notes: vec![format!("encoder={}", a.ffmpeg_encoder), r.command.clone()],
+        });
+    }
+
+    for r in &results {
+        let path = r.write(&a.out_dir).map_err(backend_err)?;
+        println!("{}", serde_json::to_string_pretty(r).expect("json"));
+        eprintln!("wrote {}", path.display());
+    }
+    if results.len() == 2 {
+        let (o, f) = (&results[0], &results[1]);
+        eprintln!(
+            "onchip {:.1} fps vs {} {:.1} fps  ({:.2}x)",
+            o.fps,
+            f.tool,
+            f.fps,
+            o.fps / f.fps.max(1e-9)
+        );
+    }
+    Ok(0)
+}
+
+/// Time the PNG path (GPU graph only; frames pre-uploaded). Returns (frames, best seconds, notes).
+fn bench_png(
+    ctx: &std::sync::Arc<GpuContext>,
+    job: &Job,
+    runs: u32,
+) -> Result<(u64, f64, Vec<String>), Exit> {
+    let color = ColorSpec::BT709_LIMITED;
     let mut best: Option<onchip_bench::Stopwatch> = None;
-    for run in 0..a.runs {
-        let graph = Graph::build(&job, color).map_err(input_err)?;
+    for run in 0..runs {
+        let graph = Graph::build(job, color).map_err(input_err)?;
         let mut source =
             PngSource::open(ctx.clone(), Path::new(&job.input), color).map_err(input_err)?;
         let mut exec = Executor::new(
@@ -450,7 +633,6 @@ fn bench(a: BenchArgs) -> Result<u8, Exit> {
             PixelFormat::Nv12,
         )
         .map_err(backend_err)?;
-        // Time only the GPU graph: upload the frames first, then run them all.
         let mut frames = Vec::with_capacity(source.len());
         while let Some(f) = source.next_frame().map_err(input_err)? {
             frames.push(f);
@@ -463,13 +645,12 @@ fn bench(a: BenchArgs) -> Result<u8, Exit> {
         }
         onchip_core::gpu::wait_idle(&ctx.device).map_err(backend_err)?;
         drop(last);
-        let secs = sw.seconds();
         eprintln!(
-            "run {}/{}: {} frames, {:.3}s, {:.1} fps",
+            "onchip run {}/{}: {} frames, {:.3}s, {:.1} fps",
             run + 1,
-            a.runs,
+            runs,
             sw.frames(),
-            secs,
+            sw.seconds(),
             sw.fps()
         );
         if best.as_ref().is_none_or(|b| sw.seconds() < b.seconds()) {
@@ -477,37 +658,96 @@ fn bench(a: BenchArgs) -> Result<u8, Exit> {
         }
     }
     let sw = best.expect("at least one run");
-    let fixture = a.fixture.clone().unwrap_or_else(|| {
-        Path::new(&job.input)
-            .file_stem()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or("input".into())
-    });
-    let result = onchip_bench::BenchResult {
-        schema: onchip_bench::BenchResult::SCHEMA,
-        date_utc: onchip_bench::now_utc(),
-        tool: "onchip".into(),
-        tool_version: onchip_core::VERSION.into(),
-        fixture,
-        graph: a.graph.clone(),
-        frames: sw.frames(),
-        wall_seconds: sw.seconds(),
-        fps: sw.fps(),
-        ms_per_frame: sw.ms_per_frame(),
-        cpu_percent: None,
-        adapter: ctx.info.clone(),
-        notes: vec![
-            "M0: PNG stand-in codec ends; GPU graph time only (frames pre-uploaded)".into(),
+    Ok((
+        sw.frames(),
+        sw.seconds(),
+        vec!["PNG stand-in codec ends; GPU graph time only (frames pre-uploaded)".into()],
+    ))
+}
+
+#[cfg(target_os = "windows")]
+fn bench_video(
+    ctx: &std::sync::Arc<GpuContext>,
+    job: &Job,
+    runs: u32,
+) -> Result<(u64, f64, Vec<String>), Exit> {
+    let mut best: Option<onchip_backend_win::pipeline::TranscodeReport> = None;
+    for run in 0..runs {
+        let r = onchip_backend_win::pipeline::transcode(ctx.clone(), job, |_| {})
+            .map_err(backend_err)?;
+        eprintln!(
+            "onchip run {}/{}: {} frames, {:.3}s, {:.1} fps",
+            run + 1,
+            runs,
+            r.frames_encoded,
+            r.seconds,
+            r.fps
+        );
+        if best.as_ref().is_none_or(|b| r.seconds < b.seconds) {
+            best = Some(r);
+        }
+    }
+    let r = best.expect("at least one run");
+    Ok((
+        r.frames_encoded,
+        r.seconds,
+        vec![
+            "full path: demux + HW decode + GPU graph + HW encode + mux".into(),
+            format!(
+                "decoder={} ({})",
+                r.decoder_mft,
+                if r.decoder_async { "async" } else { "sync" }
+            ),
+            format!(
+                "encoder={} ({})",
+                r.encoder_mft,
+                if r.encoder_async { "async" } else { "sync" }
+            ),
+            r.interop.clone(),
         ],
-    };
-    let path = result.write(&a.out_dir).map_err(backend_err)?;
-    println!("{}", serde_json::to_string_pretty(&result).expect("json"));
-    eprintln!("wrote {}", path.display());
-    Ok(0)
+    ))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn bench_video(
+    _ctx: &std::sync::Arc<GpuContext>,
+    _job: &Job,
+    _runs: u32,
+) -> Result<(u64, f64, Vec<String>), Exit> {
+    Err(backend_err(anyhow!(
+        "video benchmarks need the Windows backend (M1); macOS is M2"
+    )))
+}
+
+fn is_video_file(p: &Path) -> bool {
+    p.is_file()
+        && p.extension().is_some_and(|e| {
+            ["mp4", "mov", "m4v", "mkv", "h264", "264"]
+                .contains(&e.to_string_lossy().to_lowercase().as_str())
+        })
 }
 
 fn verify(a: VerifyArgs) -> Result<u8, Exit> {
-    let report = onchip_bench::verify_png_sequences(&a.target, &a.r#ref).map_err(input_err)?;
+    // Video files are decoded with FFmpeg (external) to PNG sequences first, so both
+    // sides go through the same decoder and chroma upsampling.
+    let tmp = std::env::temp_dir().join(format!("onchip-verify-{}", std::process::id()));
+    let target = if is_video_file(&a.target) {
+        let d = tmp.join("target");
+        onchip_bench::ffmpeg::decode_to_png_dir(&a.ffmpeg, &a.target, &d).map_err(backend_err)?;
+        d
+    } else {
+        a.target.clone()
+    };
+    let reference = if is_video_file(&a.r#ref) {
+        let d = tmp.join("ref");
+        onchip_bench::ffmpeg::decode_to_png_dir(&a.ffmpeg, &a.r#ref, &d).map_err(backend_err)?;
+        d
+    } else {
+        a.r#ref.clone()
+    };
+    let report = onchip_bench::verify_png_sequences(&target, &reference).map_err(input_err);
+    let _ = std::fs::remove_dir_all(&tmp);
+    let report = report?;
     if a.json {
         println!("{}", serde_json::to_string_pretty(&report).expect("json"));
     } else {

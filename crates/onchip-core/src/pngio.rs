@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::color::{CodedRange, ColorSpec};
-use crate::frame::{GpuFrame, NativeHandle, PixelFormat};
+use crate::frame::{GpuFrame, NativeHandle, PixelFormat, PlaneSet};
 use crate::gpu::{self, GpuContext, GpuError};
 
 #[derive(Debug, thiserror::Error)]
@@ -178,7 +178,7 @@ pub fn upload_nv12(ctx: &GpuContext, p: &Nv12Planes, color: ColorSpec, pts: i64)
     write_plane(ctx, &y, &p.y, p.width, p.height, 1);
     write_plane(ctx, &uv, &p.uv, cw, ch, 2);
     GpuFrame {
-        planes: vec![y, uv],
+        planes: PlaneSet::Separate(vec![y, uv]),
         format: PixelFormat::Nv12,
         color,
         width: p.width,
@@ -217,8 +217,10 @@ pub fn readback_nv12(ctx: &GpuContext, frame: &GpuFrame) -> Result<Nv12Planes, P
     }
     let cw = frame.width.div_ceil(2);
     let ch = frame.height.div_ceil(2);
-    let y = read_plane(ctx, &frame.planes[0], frame.width, frame.height, 1)?;
-    let uv = read_plane(ctx, &frame.planes[1], cw, ch, 2)?;
+    let (ty, ay) = frame.plane_copy_target(0);
+    let (tuv, auv) = frame.plane_copy_target(1);
+    let y = read_plane(ctx, ty, ay, frame.width, frame.height, 1)?;
+    let uv = read_plane(ctx, tuv, auv, cw, ch, 2)?;
     Ok(Nv12Planes {
         width: frame.width,
         height: frame.height,
@@ -230,6 +232,7 @@ pub fn readback_nv12(ctx: &GpuContext, frame: &GpuFrame) -> Result<Nv12Planes, P
 fn read_plane(
     ctx: &GpuContext,
     tex: &wgpu::Texture,
+    aspect: wgpu::TextureAspect,
     w: u32,
     h: u32,
     bpp: u32,
@@ -247,7 +250,7 @@ fn read_plane(
             texture: tex,
             mip_level: 0,
             origin: wgpu::Origin3d::ZERO,
-            aspect: wgpu::TextureAspect::All,
+            aspect,
         },
         wgpu::TexelCopyBufferInfo {
             buffer: &buf,

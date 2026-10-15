@@ -59,6 +59,12 @@ pub struct AdapterInfo {
     pub unified_memory: bool,
     /// Whether the adapter can filter 16-bit normalized textures (needed for P010).
     pub texture_format_16bit_norm: bool,
+    /// Whether multi-planar `NV12` textures can be created / imported (D3D12, Vulkan).
+    #[serde(default)]
+    pub texture_format_nv12: bool,
+    /// Whether multi-planar `P010` textures can be created / imported.
+    #[serde(default)]
+    pub texture_format_p010: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -93,6 +99,8 @@ pub struct EncoderConfig {
     pub bitrate_bps: u64,
     pub gop_frames: u32,
     pub framerate: (u32, u32),
+    /// Timebase of the `pts` values on the frames pushed in and the packets pulled out.
+    pub timebase: (u32, u32),
 }
 
 /// A compressed access unit.

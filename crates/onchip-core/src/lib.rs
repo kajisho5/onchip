@@ -7,6 +7,7 @@
 
 pub mod backend;
 pub mod color;
+pub mod container;
 pub mod exec;
 pub mod frame;
 pub mod gpu;
