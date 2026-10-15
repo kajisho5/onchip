@@ -131,7 +131,9 @@ struct ScaleParams {
     dst_w: u32,
     dst_h: u32,
     kernel_id: u32,
-    _pad: [u32; 3],
+    /// 0 = horizontal pass (src → tmp), 1 = vertical pass (tmp → dst).
+    axis: u32,
+    _pad: [u32; 2],
 }
 
 #[repr(C)]
@@ -183,6 +185,17 @@ enum NodeRes {
     },
     Image {
         tex: wgpu::Texture,
+    },
+    /// Separable resample: horizontal pass into `tmp` (dst_w × src_h), vertical pass
+    /// into `tex` (dst_w × dst_h).
+    Scale {
+        tmp: wgpu::Texture,
+        tmp_height: u32,
+        tex: wgpu::Texture,
+        width: u32,
+        height: u32,
+        params_h: wgpu::Buffer,
+        params_v: wgpu::Buffer,
     },
     Rgb2Yuv {
         y_buf: wgpu::Buffer,
@@ -283,19 +296,33 @@ impl Executor {
                 } => {
                     let (sw, sh) = sizes[&node.inputs[0]];
                     sizes.insert(id.clone(), (*width, *height));
-                    let p = ScaleParams {
+                    let ph = ScaleParams {
                         src_w: sw,
+                        src_h: sh,
+                        dst_w: *width,
+                        dst_h: sh,
+                        kernel_id: filter.id(),
+                        axis: 0,
+                        _pad: [0; 2],
+                    };
+                    let pv = ScaleParams {
+                        src_w: *width,
                         src_h: sh,
                         dst_w: *width,
                         dst_h: *height,
                         kernel_id: filter.id(),
-                        _pad: [0; 3],
+                        axis: 1,
+                        _pad: [0; 2],
                     };
-                    NodeRes::Working {
+                    let tmp_label = format!("{id}.h");
+                    NodeRes::Scale {
+                        tmp: gpu::create_working_texture(device, &tmp_label, *width, sh),
+                        tmp_height: sh,
                         tex: gpu::create_working_texture(device, id, *width, *height),
                         width: *width,
                         height: *height,
-                        params: uniform(device, id, bytemuck::bytes_of(&p)),
+                        params_h: uniform(device, &tmp_label, bytemuck::bytes_of(&ph)),
+                        params_v: uniform(device, id, bytemuck::bytes_of(&pv)),
                     }
                 }
                 Op::Image { path } => {
@@ -501,9 +528,9 @@ impl Executor {
 
         let view_of = |id: &str| -> wgpu::TextureView {
             match &self.res[id] {
-                NodeRes::Working { tex, .. } | NodeRes::Image { tex } => {
-                    tex.create_view(&Default::default())
-                }
+                NodeRes::Working { tex, .. }
+                | NodeRes::Image { tex }
+                | NodeRes::Scale { tex, .. } => tex.create_view(&Default::default()),
                 _ => unreachable!("no texture view for {id}"),
             }
         };
@@ -548,26 +575,47 @@ impl Executor {
                 }
                 (
                     Op::Scale { .. },
-                    NodeRes::Working {
+                    NodeRes::Scale {
+                        tmp,
+                        tmp_height,
                         tex,
                         width,
                         height,
-                        params,
+                        params_h,
+                        params_v,
                     },
                 ) => {
-                    let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                        label: Some("scale"),
+                    let tmp_view = tmp.create_view(&Default::default());
+                    let bg_h = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some("scale.h"),
                         layout: &self.pipelines.scale_layout,
                         entries: &[
                             bind_tex(0, &view_of(&node.inputs[0])),
-                            bind_tex(1, &tex.create_view(&Default::default())),
-                            bind_buf(2, params),
+                            bind_tex(1, &tmp_view),
+                            bind_buf(2, params_h),
                         ],
                     });
                     dispatch(
                         &mut encoder,
                         &self.pipelines.scale,
-                        &bg,
+                        &bg_h,
+                        *width,
+                        *tmp_height,
+                        16,
+                    );
+                    let bg_v = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some("scale.v"),
+                        layout: &self.pipelines.scale_layout,
+                        entries: &[
+                            bind_tex(0, &tmp_view),
+                            bind_tex(1, &tex.create_view(&Default::default())),
+                            bind_buf(2, params_v),
+                        ],
+                    });
+                    dispatch(
+                        &mut encoder,
+                        &self.pipelines.scale,
+                        &bg_v,
                         *width,
                         *height,
                         16,

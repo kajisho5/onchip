@@ -85,6 +85,27 @@ impl Output {
         }
         Ok(Some((n * mul as f64).round() as u64))
     }
+
+    /// Bitrate the encoder is asked for: `bitrate` if given, else a size/rate-derived
+    /// default (0.07 bit per pixel per frame, at least 2 Mbit/s). Benchmarks hand the
+    /// same value to the baseline encoder so both sides are rate-controlled identically.
+    pub fn effective_bitrate_bps(
+        &self,
+        width: u32,
+        height: u32,
+        fps: f64,
+    ) -> Result<u64, JobError> {
+        Ok(match self.bitrate_bps()? {
+            Some(b) => b,
+            None => ((width as f64 * height as f64 * fps * 0.07) as u64).max(2_000_000),
+        })
+    }
+
+    /// GOP length the encoder is asked for: `gop` if given, else two seconds.
+    pub fn effective_gop(&self, fps: f64) -> u32 {
+        self.gop
+            .unwrap_or_else(|| (fps * 2.0).round().max(1.0) as u32)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]

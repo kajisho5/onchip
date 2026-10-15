@@ -126,6 +126,17 @@ pub fn ffprobe_frame_count(ffprobe: &str, path: &Path) -> Result<u64, BenchError
         .map_err(|_| BenchError::Tool(format!("ffprobe gave {s:?} for {}", path.display())))
 }
 
+/// Encoder settings onchip used, replayed onto the FFmpeg encoder so both sides are
+/// rate-controlled the same way: `-b:v`, `-g`, `-bf 0`, H.264 High profile (100) and,
+/// for the Media Foundation encoders, `-rate_control cbr` (FFmpeg's mfenc maps these to
+/// MF_MT_AVG_BITRATE / AVEncMPVGOPSize / AVEncMPVDefaultBPictureCount /
+/// MF_MT_MPEG2_PROFILE / AVEncCommonRateControlMode — libavcodec/mfenc.c).
+#[derive(Debug, Clone, Copy)]
+pub struct EncodeSettings {
+    pub bitrate_bps: u64,
+    pub gop_frames: u32,
+}
+
 /// Run the FFmpeg CPU-filter baseline: decode (software or `hwaccel`), filter on the
 /// CPU, encode with `encoder` (e.g. `h264_mf`, `h264_nvenc`, `libx264`).
 pub fn run_ffmpeg_cpu_filters(
@@ -134,7 +145,7 @@ pub fn run_ffmpeg_cpu_filters(
     output: &Path,
     spec: &FilterSpec,
     encoder: &str,
-    bitrate_bps: Option<u64>,
+    settings: Option<EncodeSettings>,
     hwaccel: Option<&str>,
 ) -> Result<FfmpegRun, BenchError> {
     let mut cmd = Command::new(ffmpeg);
@@ -154,8 +165,16 @@ pub fn run_ffmpeg_cpu_filters(
         "-an",
     ]);
     cmd.args(["-c:v", encoder]);
-    if let Some(b) = bitrate_bps {
-        cmd.args(["-b:v", &b.to_string()]);
+    if let Some(s) = settings {
+        cmd.args(["-b:v", &s.bitrate_bps.to_string()]);
+        cmd.args(["-g", &s.gop_frames.to_string()]);
+        cmd.args(["-bf", "0"]);
+        if encoder.ends_with("_mf") {
+            // mfenc has no named profile constants; 100 = AV_PROFILE_H264_HIGH.
+            cmd.args(["-profile:v", "100", "-rate_control", "cbr"]);
+        } else {
+            cmd.args(["-profile:v", "high"]);
+        }
     }
     cmd.args(["-pix_fmt", "yuv420p"]).arg(output);
     let command = format!("{cmd:?}");
@@ -294,7 +313,10 @@ mod tests {
             &out,
             &spec,
             "libx264",
-            Some(500_000),
+            Some(EncodeSettings {
+                bitrate_bps: 500_000,
+                gop_frames: 5,
+            }),
             None,
         )
         .unwrap();

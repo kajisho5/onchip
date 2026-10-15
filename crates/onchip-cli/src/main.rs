@@ -512,8 +512,11 @@ fn bench(a: BenchArgs) -> Result<u8, Exit> {
     let mut results = Vec::new();
 
     // ---- onchip ----
-    let (frames, seconds, notes) = match job.output.codec {
-        Codec::Png => bench_png(&ctx, &job, a.runs)?,
+    let (frames, seconds, notes, settings) = match job.output.codec {
+        Codec::Png => {
+            let (f, s, n) = bench_png(&ctx, &job, a.runs)?;
+            (f, s, n, None)
+        }
         _ => bench_video(&ctx, &job, a.runs)?,
     };
     results.push(onchip_bench::BenchResult {
@@ -548,7 +551,6 @@ fn bench(a: BenchArgs) -> Result<u8, Exit> {
             )));
         }
         let out = Path::new(&job.output.path).with_extension("ffmpeg.mp4");
-        let bitrate = job.output.bitrate_bps().map_err(input_err)?;
         let mut best: Option<onchip_bench::ffmpeg::FfmpegRun> = None;
         for run in 0..a.runs {
             let r = onchip_bench::ffmpeg::run_ffmpeg_cpu_filters(
@@ -557,7 +559,7 @@ fn bench(a: BenchArgs) -> Result<u8, Exit> {
                 &out,
                 &spec,
                 &a.ffmpeg_encoder,
-                bitrate,
+                settings,
                 a.ffmpeg_hwaccel.as_deref(),
             )
             .map_err(backend_err)?;
@@ -591,7 +593,17 @@ fn bench(a: BenchArgs) -> Result<u8, Exit> {
             ms_per_frame: r.seconds * 1000.0 / r.frames.max(1) as f64,
             cpu_percent: None,
             adapter: ctx.info.clone(),
-            notes: vec![format!("encoder={}", a.ffmpeg_encoder), r.command.clone()],
+            notes: vec![
+                format!("encoder={}", a.ffmpeg_encoder),
+                match settings {
+                    Some(s) => format!(
+                        "same encoder settings as onchip: {} bit/s CBR, GOP {}, no B-frames, High",
+                        s.bitrate_bps, s.gop_frames
+                    ),
+                    None => "encoder settings: FFmpeg defaults".into(),
+                },
+                r.command.clone(),
+            ],
         });
     }
 
@@ -665,12 +677,15 @@ fn bench_png(
     ))
 }
 
+type VideoBench = (
+    u64,
+    f64,
+    Vec<String>,
+    Option<onchip_bench::ffmpeg::EncodeSettings>,
+);
+
 #[cfg(target_os = "windows")]
-fn bench_video(
-    ctx: &std::sync::Arc<GpuContext>,
-    job: &Job,
-    runs: u32,
-) -> Result<(u64, f64, Vec<String>), Exit> {
+fn bench_video(ctx: &std::sync::Arc<GpuContext>, job: &Job, runs: u32) -> Result<VideoBench, Exit> {
     let mut best: Option<onchip_backend_win::pipeline::TranscodeReport> = None;
     for run in 0..runs {
         let r = onchip_backend_win::pipeline::transcode(ctx.clone(), job, |_| {})
@@ -694,6 +709,10 @@ fn bench_video(
         vec![
             "full path: demux + HW decode + GPU graph + HW encode + mux".into(),
             format!(
+                "encoder settings: {} bit/s CBR, GOP {}, no B-frames, High ({}x{})",
+                r.bitrate_bps, r.gop_frames, r.out_width, r.out_height
+            ),
+            format!(
                 "decoder={} ({})",
                 r.decoder_mft,
                 if r.decoder_async { "async" } else { "sync" }
@@ -705,6 +724,10 @@ fn bench_video(
             ),
             r.interop.clone(),
         ],
+        Some(onchip_bench::ffmpeg::EncodeSettings {
+            bitrate_bps: r.bitrate_bps,
+            gop_frames: r.gop_frames,
+        }),
     ))
 }
 
@@ -713,7 +736,7 @@ fn bench_video(
     _ctx: &std::sync::Arc<GpuContext>,
     _job: &Job,
     _runs: u32,
-) -> Result<(u64, f64, Vec<String>), Exit> {
+) -> Result<VideoBench, Exit> {
     Err(backend_err(anyhow!(
         "video benchmarks need the Windows backend (M1); macOS is M2"
     )))

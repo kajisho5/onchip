@@ -58,6 +58,11 @@ pub struct TranscodeReport {
     pub interop: String,
     pub encoder_notes: Vec<String>,
     pub adapter: String,
+    /// Encoder settings actually requested (so a baseline can be run with the same ones).
+    pub out_width: u32,
+    pub out_height: u32,
+    pub bitrate_bps: u64,
+    pub gop_frames: u32,
 }
 
 /// Run `job` (H.264 mp4 in, H.264 mp4 out) through the Windows backend.
@@ -117,18 +122,11 @@ pub fn transcode(
     }
 
     let fps = framerate.0 as f64 / framerate.1.max(1) as f64;
-    let bitrate = match job
+    let bitrate = job
         .output
-        .bitrate_bps()
-        .map_err(|e| PipelineError::Other(e.to_string()))?
-    {
-        Some(b) => b,
-        None => ((out.width as f64 * out.height as f64 * fps * 0.07) as u64).max(2_000_000),
-    };
-    let gop = job
-        .output
-        .gop
-        .unwrap_or_else(|| (fps * 2.0).round().max(1.0) as u32);
+        .effective_bitrate_bps(out.width, out.height, fps)
+        .map_err(|e| PipelineError::Other(e.to_string()))?;
+    let gop = job.output.effective_gop(fps);
     let enc_cfg = EncoderConfig {
         codec: Codec::H264,
         width: out.width,
@@ -350,5 +348,9 @@ pub fn transcode(
         },
         encoder_notes: encoder.codec_api_notes().to_vec(),
         adapter: ctx.info.name.clone(),
+        out_width: out.width,
+        out_height: out.height,
+        bitrate_bps: bitrate,
+        gop_frames: gop,
     })
 }
