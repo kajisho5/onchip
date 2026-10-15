@@ -13,7 +13,7 @@ labelled `milestone:Mx`. Run `scripts/create-roadmap-issues.sh` once after cloni
 - [x] GPU tests behind `#[ignore]`, CPU tests in CI
 
 ## M1 — Windows on-chip path (code written, hardware run pending)
-- [x] RM-001 interop code: MF decoder → D3D11 texture → D3D12 (plan A shared NT handle / plan B GPU copy) → wgpu — **unverified on hardware**
+- [x] RM-001 interop: MF decoder → D3D11 texture → D3D12 (plan B GPU copy on AMD iGPU) → wgpu — **verified on hardware 2026-10-15**
 - [x] RM-002a shared fence sync D3D11 ⇄ D3D12 (CPU-side wait)
 - [ ] RM-002 GPU-side waits instead of CPU waits
 - [x] RM-003 wrap D3D12 texture as `wgpu::Texture` via `wgpu-hal` (NV12, plane views)
@@ -22,7 +22,7 @@ labelled `milestone:Mx`. Run `scripts/create-roadmap-issues.sh` once after cloni
 - [x] RM-006 mp4 muxer — verified with ffmpeg decode
 - [x] RM-007 `WinBackend` implementing `VideoBackend`
 - [ ] RM-008 PIX capture proving zero readback (`docs/img/pix-m1.png`)
-- [ ] RM-009 `docs/INTEROP-WIN.md` outcome section from a real run
+- [x] RM-009 `docs/INTEROP-WIN.md` outcome section from a real run
 - [x] RM-010 bench skeleton: `bench/fixtures/gen.py`, `onchip bench --against ffmpeg`, `onchip verify` on mp4 (PSNR; SSIM is M3)
 - [ ] RM-011 HEVC: parse `hvcC` ourselves (the `mp4` crate drops it), HEVC decoder/encoder MFTs
 - [ ] RM-012 allow B-frames: use `MFSampleExtension_DecodeTimestamp` for dts, negative ctts in the muxer

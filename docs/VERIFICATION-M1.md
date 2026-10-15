@@ -13,11 +13,22 @@ Facts only. Inferences are labelled.
 - `onchip bench --against ffmpeg` filter chain is exercised on Linux with `libx264`
   (`cargo test -p onchip-bench`).
 
+## Hardware run (2026-10-15, AMD Radeon integrated GPU, Windows 11)
+Done from this session by driving the Windows machine (winget installs, batch scripts):
+- `cargo build --release --workspace` — OK (MSVC)
+- `cargo test --workspace` — OK; `cargo test -p onchip-core -- --ignored` — **8/8 GPU tests pass on D3D12**
+  (YUV round trip, bit-exact flat frame, odd sizes, identity scale, downscale, overlay, FFmpeg reference)
+- `onchip probe --json` — NV12/P010 texture features present; AMDh264Encoder found; no vendor decoder MFT
+- `interop_poc` and `onchip run` (1080p → 720p + overlay, H.264) — **complete end to end**:
+  150 frames in 2.457 s = 61.1 fps with full stage tracing on; ffprobe confirms h264 1280x720 150 frames
+- Interop plan: **B** (one GPU-side copy out of the Microsoft D3D11VA decoder's texture); encoder side zero-copy
+- Three hardware-only bugs fixed along the way (see docs/INTEROP-WIN.md, Outcome)
+
 ## What is NOT verified yet
-- Nothing on this page involving Media Foundation, D3D11, D3D12 or a real GPU has run.
-  Every `unsafe` COM call was written from the crate's own signatures, but runtime
-  behaviour (type negotiation, async event flow, shared-handle opening, plane copies)
-  is **unverified** until the steps below are done on Windows.
+- PIX capture proving zero readback (RM-008). The code path contains no `Map`/readback, but that
+  is an inference until captured.
+- Playback in a player other than the Explorer thumbnail (VLC check pending).
+- Numbers above are with tracing enabled; benchmark numbers come from `onchip bench` (below).
 
 ## Steps to run on Windows (copy-paste)
 ```powershell

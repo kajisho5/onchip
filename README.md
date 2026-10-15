@@ -17,7 +17,7 @@ on both throughput **and** color accuracy? See [`docs/DESIGN.md`](docs/DESIGN.md
 | Milestone | Scope | Status |
 |---|---|---|
 | M0 | Workspace, CI, job parser, filter graph, WGSL filters (scale / overlay / color), `onchip probe` | ✅ done |
-| M1 | **Windows**: Media Foundation decode → D3D12 → Media Foundation encode, on-chip proof via PIX | 🟡 code complete, not yet run on hardware ([docs/VERIFICATION-M1.md](docs/VERIFICATION-M1.md)) |
+| M1 | **Windows**: Media Foundation decode → D3D12 → Media Foundation encode, on-chip proof via PIX | 🟡 runs end to end on hardware (AMD iGPU, plan B); PIX proof pending ([docs/VERIFICATION-M1.md](docs/VERIFICATION-M1.md)) |
 | M2 | **macOS**: VideoToolbox decode → Metal → VideoToolbox encode, on-chip proof via Instruments | ⬜ not started |
 | M3 | Color management: BT.2020 PQ, full/limited range, `onchip verify` ΔE2000 | ⬜ not started |
 | M4 | Public benchmarks vs FFmpeg (wins and losses alike) | ⬜ not started |

@@ -7,9 +7,9 @@ Facts only; anything inferred is labelled **(inference)**. The code this describ
 
 | Item | State |
 |---|---|
-| Code | written and type-checked (`cargo check/clippy --target x86_64-pc-windows-gnu`, windows 0.62.2, wgpu 30.0.1) |
-| Runtime on a real Windows GPU | **not yet run** — fill in the Environment / Outcome sections from the first run |
-| PIX capture | not yet taken |
+| Code | written; builds and passes `clippy -D warnings` on Windows (MSVC) |
+| Runtime on a real Windows GPU | **runs end to end** (2026-10-15, AMD Radeon integrated GPU, see Outcome) |
+| PIX capture | not yet taken (RM-008) |
 
 ## Design as implemented
 
@@ -46,10 +46,12 @@ file ──demux (CPU)──▶ H.264 packets ──▶ MFT decoder (D3D11, hard
   wrapping it has no reference left besides ours (COM refcount check).
 - Encoder is asked for CBR, GOP = 2 s, **B-frames = 0** (so dts == pts; RM-012 lifts this).
 
-## Environment (fill in)
-- GPU / driver:
-- OS build:
-- `onchip probe --json`:
+## Environment (2026-10-15)
+- GPU: AMD Radeon(TM) Graphics (integrated, unified memory), driver 32.0.21037.3009, D3D12 via wgpu
+- OS: Windows 11 (build not recorded yet)
+- Toolchain: rustc 1.99.0, MSVC 14.44.35207, FFmpeg 9.0.2 (external, for fixtures/baseline only)
+- `onchip probe --json`: `texture_format_nv12: true`, `texture_format_p010: true`,
+  `hw_decoders: []` (no vendor decoder MFT), `hw_encoders: [AMDh264Encoder (nv12)]`
 
 ## Crate versions and references verified
 | Crate | Version | API used | Reference |
@@ -58,14 +60,31 @@ file ──demux (CPU)──▶ H.264 packets ──▶ MFT decoder (D3D11, hard
 | `wgpu` / `wgpu-hal` | 30.0.1 | `Device::as_hal::<Dx12>`, `hal::dx12::Device::texture_from_raw`, `Device::create_texture_from_hal`, `TextureFormat::NV12` + `TextureAspect::Plane0/1`, `copy_buffer_to_texture` into a plane | read from the crate source; `wgpu-core` 30 validates planar-split copies (`command/transfer.rs`) |
 | `mp4` | 0.14.0 | `Mp4Reader` / `Mp4Writer` (H.264 only; `hvcC` not parsed → RM-011) | crate source |
 
-## Outcome (fill in from `interop_poc`)
-- Decoder MFT / async:
-- Encoder MFT / async:
-- Plan taken:
-- Frames in / out, fps:
-- Notes (ICodecAPI refusals etc.):
+## Outcome (2026-10-15)
+- Decoder MFT: `Microsoft H264 Video Decoder MFT` with the DXGI device manager (D3D11VA), sync.
+  The vendor-hardware enumeration (`MFT_ENUM_FLAG_HARDWARE`) finds nothing on this AMD
+  machine; the fallback to the Microsoft decoder is what runs. It allocates its own D3D11
+  textures (`MFT_OUTPUT_STREAM_PROVIDES_SAMPLES`), so the path is **plan B**.
+- Encoder MFT: `AMDh264Encoder`, async (event driven: 601 NeedInput / 602 HaveOutput / 603 DrainComplete).
+  It does not provide output samples; we hand it memory buffers of `cbSize`.
+- Plan taken: **plan B — one GPU-side `CopySubresourceRegion` (visible box) from the decoder's
+  texture into the shared NV12 surface**, then zero-copy into wgpu and zero-copy into the encoder.
+- `onchip run` 1080p H.264 → scale 1280x720 + overlay → H.264: 150 frames in 2.457 s
+  (**61.1 fps**, with `ONCHIP_TRACE=1` printing every stage to a file — not a benchmark number).
+  Output verified with ffprobe: h264, 1280x720, 150 frames; plays with thumbnails in Explorer.
+- Bugs found and fixed on hardware: (1) the DXVA fallback had been lost before the first
+  commit; (2) `surface_busy` counted a `cast()`'s own reference, so the 8-surface encoder pool
+  looked permanently busy and the run stalled at exactly 8 frames; (3) draining the Microsoft
+  decoder at end of stream released its whole reorder buffer at once and exhausted the decoder
+  surface pool — the output queue is now capped at 6 and a refused packet is parked.
+- Notes: ICodecAPI settings (CBR, mean bitrate, GOP, B-frames=0) — refusals not yet recorded
+  (`encoder_notes` in the interop_poc JSON).
 
-## Proof of zero readback (fill in)
+## Proof of zero readback (pending)
+- What is already known from the code path: between decoder output and encoder input the
+  only operations are `CopySubresourceRegion` (D3D11, GPU→GPU), wgpu compute passes,
+  `copy_buffer_to_texture` (GPU→GPU) and `MFCreateDXGISurfaceBuffer` (wraps the texture).
+  The CPU-side waits are fence/event waits, not maps. **This is an inference until PIX shows it.**
 - Tool (PIX / GPUView):
 - Capture: `docs/img/pix-m1.png`
 - Procedure: capture `interop_poc.exe in.mp4 out.mp4` for ~60 frames; in the PIX event
