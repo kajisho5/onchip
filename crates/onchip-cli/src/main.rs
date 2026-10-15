@@ -71,6 +71,9 @@ struct RunArgs {
     /// Source color (`bt709`, `bt709_full`)
     #[arg(long, default_value = "bt709")]
     color: String,
+    /// Encoder bitrate for video codecs, e.g. `20M` or `800k` (default: size-derived)
+    #[arg(long, value_name = "BITRATE")]
+    bitrate: Option<String>,
     /// Print the job JSON that would run, and stop
     #[arg(long)]
     dump_job: bool,
@@ -361,13 +364,18 @@ fn load_job(a: &RunArgs) -> Result<Job, Exit> {
         Some(o) => Some(parse_overlay(o)?),
         None => None,
     };
-    Ok(Job::shorthand(
+    let mut job = Job::shorthand(
         &a.input.to_string_lossy(),
         &output.to_string_lossy(),
         a.codec.into(),
         scale,
         overlay,
-    ))
+    );
+    if let Some(b) = &a.bitrate {
+        job.output.bitrate = Some(b.clone());
+        job.output.bitrate_bps().map_err(input_err)?;
+    }
+    Ok(job)
 }
 
 fn run(a: RunArgs) -> Result<u8, Exit> {
