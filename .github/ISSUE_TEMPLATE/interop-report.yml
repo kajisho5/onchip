@@ -1,0 +1,47 @@
+name: Interop report
+description: Report whether the on-chip path works on your GPU (plan A / plan B / failed)
+title: "[interop] <GPU> on <OS>"
+labels: ["interop-report"]
+body:
+  - type: input
+    id: gpu
+    attributes:
+      label: GPU name
+      placeholder: e.g. NVIDIA GeForce RTX 4070 / Apple M3 Pro
+    validations:
+      required: true
+  - type: input
+    id: driver
+    attributes:
+      label: Driver version
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: OS build
+      placeholder: e.g. Windows 11 23H2 (22631.4317) / macOS 15.1
+    validations:
+      required: true
+  - type: textarea
+    id: probe
+    attributes:
+      label: "`onchip probe --json` output"
+      render: json
+    validations:
+      required: true
+  - type: dropdown
+    id: outcome
+    attributes:
+      label: Which path worked?
+      options:
+        - Plan A — shared handle, zero copy
+        - Plan B — GPU-side copy
+        - Failed
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / notes
+      description: Paste `onchip run` or `interop_poc` output. Mark inferences as such.

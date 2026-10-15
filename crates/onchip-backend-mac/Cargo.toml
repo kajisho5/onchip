@@ -1,0 +1,12 @@
+[package]
+name = "onchip-backend-mac"
+description = "onchip macOS backend: VideoToolbox + Metal interop (M2)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+onchip-core.workspace = true

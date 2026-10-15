@@ -1,0 +1,19 @@
+[package]
+name = "onchip-backend-win"
+description = "onchip Windows backend: Media Foundation + D3D12 interop (M1)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+onchip-core.workspace = true
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Media_MediaFoundation",
+    "Win32_System_Com",
+] }

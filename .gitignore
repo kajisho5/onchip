@@ -1,0 +1,13 @@
+/target
+**/*.rs.bk
+/bench/fixtures/*.mp4
+/bench/fixtures/*.mov
+/bench/fixtures/*.png
+!/bench/fixtures/gen.py
+/bench/results/*.json
+!/bench/results/.gitkeep
+/tests/ref/*.png
+*.pix
+*.etl
+.DS_Store
+Thumbs.db

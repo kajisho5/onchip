@@ -1,0 +1,39 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/onchip-core",
+    "crates/onchip-backend-win",
+    "crates/onchip-backend-mac",
+    "crates/onchip-cli",
+    "crates/onchip-bench",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/kajisho5/onchip"
+authors = ["kajisho5"]
+rust-version = "1.90"
+
+[workspace.dependencies]
+onchip-core = { path = "crates/onchip-core", version = "0.1.0" }
+onchip-backend-win = { path = "crates/onchip-backend-win", version = "0.1.0" }
+onchip-backend-mac = { path = "crates/onchip-backend-mac", version = "0.1.0" }
+onchip-bench = { path = "crates/onchip-bench", version = "0.1.0" }
+
+wgpu = { version = "30", default-features = false, features = ["wgsl", "metal", "dx12", "vulkan"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+thiserror = "2"
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
+pollster = "0.4"
+bytemuck = { version = "1", features = ["derive"] }
+windows = "0.62"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
