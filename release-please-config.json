@@ -5,15 +5,6 @@
   "bump-patch-for-minor-pre-major": false,
   "include-component-in-tag": false,
   "packages": {
-    ".": {
-      "release-type": "rust",
-      "extra-files": [
-        "crates/onchip-core/Cargo.toml",
-        "crates/onchip-backend-win/Cargo.toml",
-        "crates/onchip-backend-mac/Cargo.toml",
-        "crates/onchip-cli/Cargo.toml",
-        "crates/onchip-bench/Cargo.toml"
-      ]
-    }
+    ".": {}
   }
 }
