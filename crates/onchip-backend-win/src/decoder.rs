@@ -23,7 +23,10 @@ use crate::mft::{
     Pulled, Transform, enumerate_any, enumerate_hw, unpack2, video_media_type, video_type_info,
 };
 
-const POOL_MAX: usize = 16;
+const POOL_MAX: usize = 24;
+/// Stop pulling decoder output once this many frames wait in the queue; the MFT keeps
+/// the rest until the caller catches up (keeps the surface pool bounded during drain).
+const QUEUE_CAP: usize = 6;
 
 struct Slot {
     surface: Arc<SharedSurface>,
@@ -50,6 +53,8 @@ pub struct WinDecoder {
     frame_duration_100ns: i64,
     pool: Vec<Slot>,
     out_queue: VecDeque<GpuFrame>,
+    /// A packet the MFT refused while its output queue was full; retried on `pull`.
+    pending_input: Option<IMFSample>,
     pub interop: InteropPath,
     eos_sent: bool,
     pub frames_out: u64,
@@ -153,6 +158,7 @@ impl WinDecoder {
             frame_duration_100ns,
             pool: Vec::new(),
             out_queue: VecDeque::new(),
+            pending_input: None,
             interop,
             eos_sent: false,
             frames_out: 0,
@@ -320,6 +326,9 @@ impl WinDecoder {
     fn drain_outputs(&mut self, blocking: bool) -> Result<bool, BackendError> {
         let mut produced = false;
         loop {
+            if self.out_queue.len() >= QUEUE_CAP {
+                return Ok(produced);
+            }
             // plan A needs a surface before asking for output
             let slot = if self.interop == InteropPath::SharedHandleZeroCopy {
                 Some(self.acquire_slot()?)
@@ -364,13 +373,28 @@ impl WinDecoder {
 
 impl Decoder for WinDecoder {
     fn push(&mut self, packet: Packet) -> Result<(), BackendError> {
+        if self.pending_input.is_some() {
+            return Err(BackendError::Platform(
+                "decoder: push called while a packet is still pending — pull frames first".into(),
+            ));
+        }
         let sample = self.make_input_sample(&packet)?;
         loop {
             if self.tf.push(&sample)? {
                 return Ok(());
             }
             // MFT is full: pull what it has and try again
-            if !self.drain_outputs(true)? && !self.tf.is_async {
+            if self.drain_outputs(true)? {
+                continue;
+            }
+            if !self.out_queue.is_empty() {
+                // our queue is at its cap; the MFT will take the packet once frames are
+                // consumed
+                crate::pipeline::trace(|| "decoder: holding packet until frames are pulled".into());
+                self.pending_input = Some(sample);
+                return Ok(());
+            }
+            if !self.tf.is_async {
                 return Err(BackendError::Platform(format!(
                     "{}: refuses input and produces no output",
                     self.tf.name
@@ -380,14 +404,31 @@ impl Decoder for WinDecoder {
     }
 
     fn pull(&mut self) -> Result<Option<GpuFrame>, BackendError> {
-        if let Some(f) = self.out_queue.pop_front() {
-            return Ok(Some(f));
+        if self.out_queue.is_empty() {
+            self.drain_outputs(self.eos_sent)?;
         }
-        self.drain_outputs(self.eos_sent)?;
-        Ok(self.out_queue.pop_front())
+        let frame = self.out_queue.pop_front();
+        if let Some(sample) = self.pending_input.take() {
+            if self.tf.push(&sample)? {
+                crate::pipeline::trace(|| "decoder: pending packet accepted".into());
+            } else {
+                self.pending_input = Some(sample);
+            }
+        }
+        Ok(frame)
     }
 
     fn flush(&mut self) -> Result<(), BackendError> {
+        if let Some(sample) = self.pending_input.take() {
+            // make room, then deliver the last packet before draining
+            while !self.tf.push(&sample)? {
+                if !self.drain_outputs(true)? && self.out_queue.len() >= QUEUE_CAP {
+                    return Err(BackendError::Platform(
+                        "decoder: cannot deliver the last packet; pull frames before flush".into(),
+                    ));
+                }
+            }
+        }
         if !self.eos_sent {
             self.tf.drain()?;
             self.eos_sent = true;
