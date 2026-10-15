@@ -24,6 +24,38 @@ Done from this session by driving the Windows machine (winget installs, batch sc
 - Interop plan: **B** (one GPU-side copy out of the Microsoft D3D11VA decoder's texture); encoder side zero-copy
 - Three hardware-only bugs fixed along the way (see docs/INTEROP-WIN.md, Outcome)
 
+## First benchmark run (2026-10-15, same machine) — superseded, kept for the record
+`onchip bench --against ffmpeg --ffmpeg-encoder h264_mf --runs 3`, best of 3, committed in
+`bench/results/20261015143*`:
+
+| fixture → graph | onchip | ffmpeg (CPU decode + swscale + h264_mf) | ratio |
+|---|---|---|---|
+| 1080p → 1280x720 + overlay | 69.0 fps | 207.8 fps | 0.33x |
+| 2160p → 1920x1080 + overlay | 22.5 fps | 93.8 fps | 0.24x |
+
+`onchip verify` (onchip output vs FFmpeg output): 23.2 dB (1080p), 23.5 dB (2160p).
+
+Two things were wrong with this run and were diagnosed with FFmpeg's `psnr` filter on the
+Windows machine (per-plane, ±1-frame shifts, each output against an unencoded swscale
+reference, overlay region excluded) plus the scale reference test on lavapipe:
+1. **Unequal encoder settings.** The job had no `bitrate`, so onchip used its default
+   (2.0 Mbit/s CBR, High, GOP 60, no B-frames) while FFmpeg ran `h264_mf` with FFmpeg's
+   defaults — Constrained Baseline at 1.19 Mbit/s, non-CBR. Against the unencoded reference
+   the FFmpeg output scored 30.5 dB (47 dB on its first frame), onchip's 25.0 dB with no frame
+   above 25.8 dB — i.e. CBR at 2 Mbit/s starving every frame of this noisy fixture, not a
+   pipeline fault (no plane swap: Y was the worst plane; no frame shift; same averages).
+   Fix: the bench now replays onchip's bitrate/GOP/B-frames/profile/CBR onto ffmpeg.
+2. **The 2-D scale kernel was the throughput bottleneck.** `interop_poc` (no filters) ran
+   the same 1080p fixture at 139.6 fps; with lanczos3 downscale it fell to 69 fps, and at 4K
+   (stretch 2 → 12 taps per axis → 144 fetches per pixel) to 22.5 fps. Fix: separable
+   two-pass scale (same kernel, ~2·taps fetches).
+
+Also found: `gpu_scale_matches_ffmpeg_reference` had never actually run (it skips without
+`tests/ref/`), and its RGB-PSNR criterion against an RGB-scaled reference is unreachable for
+any 4:2:0 pipeline; it now asserts luma PSNR ≥ 40 dB against a 4:2:0-chain swscale
+reference (40.6 dB on lavapipe, before and after the separable change — the two shaders
+agree).
+
 ## What is NOT verified yet
 - PIX capture proving zero readback (RM-008). The code path contains no `Map`/readback, but that
   is an inference until captured.
