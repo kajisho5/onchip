@@ -21,6 +21,13 @@ use crate::{WinBackend, open};
 
 const ENCODER_POOL: usize = 8;
 
+/// Stage tracing to stderr, on when `ONCHIP_TRACE` is set. Cheap enough to leave in.
+pub fn trace(msg: impl FnOnce() -> String) {
+    if std::env::var_os("ONCHIP_TRACE").is_some() {
+        eprintln!("[onchip] {}", msg());
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum PipelineError {
     #[error(transparent)]
@@ -65,12 +72,33 @@ pub fn transcode(
             job.output.codec
         )));
     }
+    trace(|| "opening backend (MFStartup, D3D11 device, DXGI manager, shared fence)".into());
     let backend: WinBackend = open(ctx.clone())?;
+    trace(|| format!("backend open; adapter luid {:#x}", backend.d3d.adapter_luid));
     let mut demux = Mp4Demuxer::open(Path::new(&job.input))?;
+    trace(|| {
+        format!(
+            "demux: {}x{} {:?} {} samples, fps {:?}",
+            demux.info.width,
+            demux.info.height,
+            demux.info.codec,
+            demux.sample_count(),
+            demux.framerate
+        )
+    });
     let framerate = demux.framerate;
     let timebase = demux.info.timebase;
 
     let mut decoder = backend.open_decoder_with_rate(&demux.info, framerate)?;
+    trace(|| {
+        format!(
+            "decoder: {} async={} provides_samples={} interop={:?}",
+            decoder.mft_name(),
+            decoder.is_async(),
+            decoder.provides_samples(),
+            decoder.interop
+        )
+    });
     let graph = Graph::build(job, demux.info.color)?;
     let mut exec = Executor::new(
         ctx.clone(),
@@ -113,11 +141,25 @@ pub fn transcode(
         timebase,
     };
     let mut encoder = crate::encoder::WinEncoder::open(backend.d3d.clone(), &enc_cfg)?;
+    trace(|| {
+        format!(
+            "encoder: {} async={} notes={:?}",
+            encoder.mft_name(),
+            encoder.is_async(),
+            encoder.codec_api_notes()
+        )
+    });
 
     let mut pool: Vec<Arc<SharedSurface>> = Vec::with_capacity(ENCODER_POOL);
     for _ in 0..ENCODER_POOL {
         pool.push(backend.alloc_encoder_surface(out.width, out.height)?);
     }
+    trace(|| {
+        format!(
+            "{} encoder surfaces {}x{} allocated",
+            ENCODER_POOL, out.width, out.height
+        )
+    });
     let mut next_slot = 0usize;
 
     let frame_duration =
@@ -197,9 +239,22 @@ pub fn transcode(
             }
         };
         let mut target = backend.surface_frame(&surface, out_color);
+        trace(|| format!("frame pts={}: running graph", frame.pts));
         exec.run_frame_into(&frame, &mut target)?;
+        trace(|| {
+            format!(
+                "frame pts={}: graph submitted, pushing to encoder",
+                frame.pts
+            )
+        });
         encoder.push(target)?;
         *encoded += 1;
+        trace(|| {
+            format!(
+                "frame pts={}: encoder accepted ({} so far)",
+                frame.pts, *encoded
+            )
+        });
         while let Some(p) = encoder.pull()? {
             sink(p, muxer, pending, written)?;
         }
@@ -208,7 +263,17 @@ pub fn transcode(
 
     let mut frames_decoded = 0u64;
     while let Some(packet) = demux.next_packet()? {
+        trace(|| {
+            format!(
+                "packet dts={} pts={} key={} {} bytes",
+                packet.dts,
+                packet.pts,
+                packet.keyframe,
+                packet.data.len()
+            )
+        });
         decoder.push(packet)?;
+        trace(|| "packet accepted by decoder".into());
         while let Some(frame) = decoder.pull()? {
             frames_decoded += 1;
             process(
@@ -222,6 +287,7 @@ pub fn transcode(
             progress(frames_decoded);
         }
     }
+    trace(|| "draining decoder".into());
     decoder.flush()?;
     while let Some(frame) = decoder.pull()? {
         frames_decoded += 1;
@@ -235,6 +301,7 @@ pub fn transcode(
         )?;
         progress(frames_decoded);
     }
+    trace(|| "draining encoder".into());
     encoder.flush()?;
     while let Some(p) = encoder.pull()? {
         sink(p, &mut muxer, &mut pending_packets, &mut packets_written)?;

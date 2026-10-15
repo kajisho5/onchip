@@ -251,7 +251,9 @@ impl Encoder for WinEncoder {
             "encoder input must be a frame from WinBackend::alloc_encoder_frame".into(),
         ))?;
         // wgpu must be done writing the surface before D3D11 reads it.
+        crate::pipeline::trace(|| "encoder: waiting for wgpu".into());
         self.d3d.wgpu_wait_idle()?;
+        crate::pipeline::trace(|| "encoder: wgpu idle, building sample".into());
         // SAFETY: the surface's D3D11 texture is live and shared.
         let sample = unsafe {
             let buf = MFCreateDXGISurfaceBuffer(&ID3D11Texture2D::IID, &surface.tex11, 0, false)
@@ -267,9 +269,11 @@ impl Encoder for WinEncoder {
             sample
         };
         loop {
+            crate::pipeline::trace(|| "encoder: ProcessInput".into());
             if self.tf.push(&sample)? {
                 break;
             }
+            crate::pipeline::trace(|| "encoder: not accepting, pulling output".into());
             if !self.drain_outputs(true)? && !self.tf.is_async {
                 return Err(BackendError::Platform(format!(
                     "{}: refuses input and produces no output",

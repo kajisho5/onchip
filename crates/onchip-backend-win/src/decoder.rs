@@ -167,6 +167,10 @@ impl WinDecoder {
         self.tf.is_async
     }
 
+    pub fn provides_samples(&self) -> bool {
+        self.tf.provides_samples
+    }
+
     fn ticks_to_100ns(&self, t: i64) -> i64 {
         (t as i128 * 10_000_000 * self.timebase.0 as i128 / self.timebase.1 as i128) as i64
     }
@@ -299,7 +303,9 @@ impl WinDecoder {
         }
         // Make sure the decode (plan A) or the copy (plan B) has finished before wgpu
         // touches the surface.
+        crate::pipeline::trace(|| "decoder: signal+wait D3D11 fence".into());
         self.d3d.d3d11_signal_and_wait()?;
+        crate::pipeline::trace(|| "decoder: fence passed".into());
         // SAFETY: sample is live.
         let pts_hns = unsafe { sample.GetSampleTime() }.unwrap_or(0);
         drop(sample);

@@ -13,16 +13,16 @@ use windows::Win32::Media::MediaFoundation::{
     IMFActivate, IMFAttributes, IMFMediaEvent, IMFMediaEventGenerator, IMFMediaType, IMFSample,
     IMFTransform, METransformDrainComplete, METransformHaveOutput, METransformNeedInput,
     MF_E_NO_MORE_TYPES, MF_E_NOTACCEPTING, MF_E_TRANSFORM_NEED_MORE_INPUT,
-    MF_E_TRANSFORM_STREAM_CHANGE, MF_EVENT_FLAG_NO_WAIT, MF_EVENT_FLAG_NONE, MF_MT_FRAME_RATE,
-    MF_MT_FRAME_SIZE, MF_MT_INTERLACE_MODE, MF_MT_MAJOR_TYPE, MF_MT_PIXEL_ASPECT_RATIO,
-    MF_MT_SUBTYPE, MF_TRANSFORM_ASYNC, MF_TRANSFORM_ASYNC_UNLOCK, MFCreateMediaType,
-    MFMediaType_Video, MFT_CATEGORY_VIDEO_DECODER, MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_FLAG,
-    MFT_ENUM_FLAG_ASYNCMFT, MFT_ENUM_FLAG_HARDWARE, MFT_ENUM_FLAG_SORTANDFILTER,
-    MFT_ENUM_FLAG_SYNCMFT, MFT_FRIENDLY_NAME_Attribute, MFT_MESSAGE_COMMAND_DRAIN,
-    MFT_MESSAGE_COMMAND_FLUSH, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING,
-    MFT_MESSAGE_NOTIFY_END_OF_STREAM, MFT_MESSAGE_NOTIFY_START_OF_STREAM,
-    MFT_MESSAGE_SET_D3D_MANAGER, MFT_OUTPUT_DATA_BUFFER, MFT_OUTPUT_STREAM_PROVIDES_SAMPLES,
-    MFT_REGISTER_TYPE_INFO, MFTEnumEx, MFVideoInterlace_Progressive,
+    MF_E_TRANSFORM_STREAM_CHANGE, MF_EVENT_FLAG_NO_WAIT, MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE,
+    MF_MT_INTERLACE_MODE, MF_MT_MAJOR_TYPE, MF_MT_PIXEL_ASPECT_RATIO, MF_MT_SUBTYPE,
+    MF_TRANSFORM_ASYNC, MF_TRANSFORM_ASYNC_UNLOCK, MFCreateMediaType, MFMediaType_Video,
+    MFT_CATEGORY_VIDEO_DECODER, MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_FLAG, MFT_ENUM_FLAG_ASYNCMFT,
+    MFT_ENUM_FLAG_HARDWARE, MFT_ENUM_FLAG_SORTANDFILTER, MFT_ENUM_FLAG_SYNCMFT,
+    MFT_FRIENDLY_NAME_Attribute, MFT_MESSAGE_COMMAND_DRAIN, MFT_MESSAGE_COMMAND_FLUSH,
+    MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, MFT_MESSAGE_NOTIFY_END_OF_STREAM,
+    MFT_MESSAGE_NOTIFY_START_OF_STREAM, MFT_MESSAGE_SET_D3D_MANAGER, MFT_OUTPUT_DATA_BUFFER,
+    MFT_OUTPUT_STREAM_PROVIDES_SAMPLES, MFT_REGISTER_TYPE_INFO, MFTEnumEx,
+    MFVideoInterlace_Progressive,
 };
 use windows::Win32::System::Com::CoTaskMemFree;
 use windows::core::{GUID, Interface, PWSTR};
@@ -440,30 +440,38 @@ impl Transform {
         Ok(())
     }
 
-    /// Process one event from an async MFT. `block` waits for the next event; otherwise
-    /// returns immediately when none is queued.
+    /// Process one event from an async MFT. `block` waits (polling, with a deadline so a
+    /// misbehaving MFT turns into an error instead of a hang); otherwise returns
+    /// immediately when none is queued.
     fn pump_event(&mut self, block: bool) -> Result<(), BackendError> {
         let Some(events) = &self.events else {
             return Ok(());
         };
-        let flags = if block {
-            MF_EVENT_FLAG_NONE
-        } else {
-            MF_EVENT_FLAG_NO_WAIT
-        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
         // SAFETY: live event generator.
-        let ev: IMFMediaEvent = match unsafe { events.GetEvent(flags) } {
-            Ok(ev) => ev,
-            Err(e)
-                if !block
-                    && e.code()
+        let ev: IMFMediaEvent = loop {
+            match unsafe { events.GetEvent(MF_EVENT_FLAG_NO_WAIT) } {
+                Ok(ev) => break ev,
+                Err(e)
+                    if e.code()
                         == windows::Win32::Media::MediaFoundation::MF_E_NO_EVENTS_AVAILABLE =>
-            {
-                return Ok(());
+                {
+                    if !block {
+                        return Ok(());
+                    }
+                    if std::time::Instant::now() > deadline {
+                        return Err(BackendError::Platform(format!(
+                            "{}: no MFT event for 15 s (need_input_credits={}, pending_output={}, streaming={})",
+                            self.name, self.need_input_credits, self.pending_output, self.streaming
+                        )));
+                    }
+                    std::thread::sleep(std::time::Duration::from_micros(500));
+                }
+                Err(e) => return Err(werr("GetEvent", e)),
             }
-            Err(e) => return Err(werr("GetEvent", e)),
         };
         let ty = unsafe { ev.GetType() }.map_err(|e| werr("IMFMediaEvent::GetType", e))?;
+        crate::pipeline::trace(|| format!("{}: event {ty}", self.name));
         match ty {
             t if t == METransformNeedInput.0 as u32 => self.need_input_credits += 1,
             t if t == METransformHaveOutput.0 as u32 => self.pending_output = true,

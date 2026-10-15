@@ -34,7 +34,7 @@ use windows::Win32::Graphics::Dxgi::{
     IDXGIFactory4, IDXGIResource1,
 };
 use windows::Win32::Media::MediaFoundation::{IMFDXGIDeviceManager, MFCreateDXGIDeviceManager};
-use windows::Win32::System::Threading::{CreateEventW, INFINITE, WaitForSingleObject};
+use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
 use windows::core::Interface;
 
 pub fn werr(what: &str, e: windows::core::Error) -> BackendError {
@@ -231,9 +231,12 @@ impl D3dShared {
                 self.fence12
                     .SetEventOnCompletion(v, self.fence_event)
                     .map_err(|e| werr("ID3D12Fence::SetEventOnCompletion", e))?;
-                let r = WaitForSingleObject(self.fence_event, INFINITE);
+                let r = WaitForSingleObject(self.fence_event, 10_000);
                 if r != WAIT_OBJECT_0 {
-                    return Err(BackendError::Platform(format!("fence wait returned {r:?}")));
+                    return Err(BackendError::Platform(format!(
+                        "D3D11→D3D12 fence wait for value {v} returned {r:?} (completed {})",
+                        self.fence12.GetCompletedValue()
+                    )));
                 }
             }
         }

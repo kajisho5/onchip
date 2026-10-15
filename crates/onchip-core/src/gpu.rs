@@ -352,11 +352,15 @@ pub fn align_row(bytes: u32) -> u32 {
     bytes.div_ceil(a) * a
 }
 
-/// Block until all submitted work is done.
+/// Block until all submitted work is done. Bounded (30 s) so a wedged GPU surfaces as an
+/// error with context rather than a hang.
 pub fn wait_idle(device: &wgpu::Device) -> Result<(), GpuError> {
     device
-        .poll(wgpu::PollType::wait_indefinitely())
-        .map_err(|e| GpuError::Device(e.to_string()))?;
+        .poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: Some(std::time::Duration::from_secs(30)),
+        })
+        .map_err(|e| GpuError::Device(format!("waiting for GPU work: {e}")))?;
     Ok(())
 }
 
