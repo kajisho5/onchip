@@ -1,0 +1,29 @@
+{
+  "schema": 1,
+  "date_utc": "2026-10-15T14:38:04Z",
+  "tool": "ffmpeg-cpu",
+  "tool_version": "ffmpeg version 9.0.2-full_build-www.gyan.dev Copyright (c) 2000-2026 the FFmpeg developers",
+  "fixture": "fixture_bars_2160p_nv12",
+  "graph": "scale-overlay",
+  "frames": 150,
+  "wall_seconds": 1.5983494999999999,
+  "fps": 93.84680884875306,
+  "ms_per_frame": 10.655663333333331,
+  "adapter": {
+    "name": "AMD Radeon(TM) Graphics",
+    "backend": "Dx12",
+    "device_type": "IntegratedGpu",
+    "driver": "32.0.21037.3009",
+    "driver_info": "",
+    "vendor": 4098,
+    "device": 5761,
+    "unified_memory": true,
+    "texture_format_16bit_norm": true,
+    "texture_format_nv12": true,
+    "texture_format_p010": true
+  },
+  "notes": [
+    "encoder=h264_mf",
+    "\"ffmpeg\" \"-hide_banner\" \"-loglevel\" \"error\" \"-y\" \"-benchmark\" \"-i\" \"bench\\\\fixtures\\\\fixture_bars_2160p_nv12.mp4\" \"-i\" \"bench\\\\fixtures\\\\logo_sample.png\" \"-filter_complex\" \"[0:v]scale=1920:1080:flags=lanczos[v0];[1:v]format=rgba,colorchannelmixer=aa=0.9[ov];[v0][ov]overlay=32:32[v1]\" \"-map\" \"[v1]\" \"-an\" \"-c:v\" \"h264_mf\" \"-pix_fmt\" \"yuv420p\" \"C:\\\\Users\\\\seventhwell-011\\\\Desktop\\\\onchip-2160.ffmpeg.mp4\""
+  ]
+}
