@@ -342,6 +342,7 @@ impl WinDecoder {
                     produced = true;
                 }
                 Pulled::StreamChange => {
+                    crate::pipeline::trace(|| "decoder: stream change, renegotiating".into());
                     if let Some((_, in_use)) = slot {
                         in_use.store(false, Ordering::Release);
                     }

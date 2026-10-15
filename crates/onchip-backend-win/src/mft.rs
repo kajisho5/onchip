@@ -361,7 +361,20 @@ impl Transform {
         // SAFETY: `out` is a valid buffer for one stream; ownership of pSample/pEvents is
         // taken back with ManuallyDrop::take below.
         let mut outs = [out];
+        crate::pipeline::trace(|| {
+            format!(
+                "{}: ProcessOutput (provides_samples={})",
+                self.name, self.provides_samples
+            )
+        });
         let r = unsafe { self.mft.ProcessOutput(0, &mut outs, &mut status) };
+        crate::pipeline::trace(|| {
+            format!(
+                "{}: ProcessOutput -> {:?} status={status:#x}",
+                self.name,
+                r.as_ref().map(|_| ()).map_err(|e| e.code())
+            )
+        });
         let [mut out] = outs;
         let sample = unsafe { ManuallyDrop::take(&mut out.pSample) };
         let events = unsafe { ManuallyDrop::take(&mut out.pEvents) };

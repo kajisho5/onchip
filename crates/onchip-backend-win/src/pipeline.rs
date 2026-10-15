@@ -208,6 +208,7 @@ pub fn transcode(
         let m = muxer.as_mut().expect("muxer exists");
         m.write_packet(&Packet { data, ..packet })?;
         *written += 1;
+        trace(|| format!("packet written ({} so far)", *written));
         Ok(())
     };
 

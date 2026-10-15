@@ -192,6 +192,7 @@ impl WinEncoder {
     }
 
     fn sample_to_packet(&self, sample: IMFSample) -> Result<Packet, BackendError> {
+        crate::pipeline::trace(|| "encoder: sample_to_packet".into());
         // SAFETY: live sample; the contiguous buffer is locked, copied, unlocked.
         unsafe {
             let buf = sample
@@ -237,6 +238,7 @@ impl WinEncoder {
                 }
                 Pulled::StreamChange => {
                     // output type is fixed for an encoder; re-read stream info and go on
+                    crate::pipeline::trace(|| "encoder: stream change".into());
                     self.tf.refresh_stream_info()?;
                 }
                 Pulled::NeedInput | Pulled::DrainComplete => return Ok(produced),
