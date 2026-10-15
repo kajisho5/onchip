@@ -4,7 +4,7 @@
 /bench/fixtures/*.mov
 /bench/fixtures/*.png
 !/bench/fixtures/gen.py
-/bench/results/*.json
+# bench/results/*.json are committed on purpose (wins and losses alike)
 !/bench/results/.gitkeep
 /tests/ref/*.png
 *.pix
