@@ -11,13 +11,17 @@ use onchip_core::container::{AvcConfig, avcc_to_annexb};
 use onchip_core::frame::GpuFrame;
 use windows::Win32::Graphics::Direct3D11::ID3D11Texture2D;
 use windows::Win32::Media::MediaFoundation::{
-    IMFDXGIBuffer, IMFSample, MF_MT_FRAME_SIZE, MFCreateDXGISurfaceBuffer, MFCreateMemoryBuffer,
-    MFCreateSample, MFSampleExtension_CleanPoint, MFVideoFormat_H264, MFVideoFormat_NV12,
+    CODECAPI_AVDecVideoAcceleration_H264, ICodecAPI, IMFDXGIBuffer, IMFSample, MF_MT_FRAME_SIZE,
+    MFCreateDXGISurfaceBuffer, MFCreateMemoryBuffer, MFCreateSample, MFSampleExtension_CleanPoint,
+    MFVideoFormat_H264, MFVideoFormat_NV12,
 };
+use windows::Win32::System::Variant::VARIANT;
 use windows::core::Interface;
 
 use crate::d3d::{D3dShared, InteropPath, SharedSurface, SurfaceRole, werr};
-use crate::mft::{Pulled, Transform, enumerate_hw, unpack2, video_media_type, video_type_info};
+use crate::mft::{
+    Pulled, Transform, enumerate_any, enumerate_hw, unpack2, video_media_type, video_type_info,
+};
 
 const POOL_MAX: usize = 16;
 
@@ -65,18 +69,43 @@ impl WinDecoder {
 
         let input_info = video_type_info(MFVideoFormat_H264);
         let output_info = video_type_info(MFVideoFormat_NV12);
+        // Vendor hardware MFTs first (Intel / some AMD / NVIDIA-less boxes ship them).
+        // When there is none, the Microsoft H.264 decoder does the hardware decode via
+        // D3D11VA once it is given the DXGI device manager — still on-chip.
         let mut found = enumerate_hw(
             crate::mft::decoder_category(),
             Some(&input_info),
             Some(&output_info),
         )?;
+        let mut via_dxva = false;
+        if found.is_empty() {
+            found = enumerate_any(
+                crate::mft::decoder_category(),
+                Some(&input_info),
+                Some(&output_info),
+            )?;
+            via_dxva = true;
+        }
         if found.is_empty() {
             return Err(BackendError::Platform(
-                "no hardware H.264 decoder MFT with NV12 output".into(),
+                "no H.264 decoder MFT with NV12 output (neither vendor hardware nor Microsoft)"
+                    .into(),
             ));
         }
-        let (name, act) = found.remove(0);
+        let (mut name, act) = found.remove(0);
+        if via_dxva {
+            name.push_str(" (D3D11VA via DXGI device manager)");
+        }
         let mut tf = Transform::activate(name, &act, Some(&d3d.dxgi_manager))?;
+        if via_dxva {
+            // Ask the Microsoft decoder for DXVA explicitly (it defaults to it when a D3D
+            // manager is set, but some builds want the switch). Best effort.
+            if let Ok(api) = tf.mft.cast::<ICodecAPI>() {
+                let on = VARIANT::from(1u32);
+                // SAFETY: live ICodecAPI; GUID and VARIANT are valid for the call.
+                let _ = unsafe { api.SetValue(&CODECAPI_AVDecVideoAcceleration_H264, &on) };
+            }
+        }
 
         let in_type = video_media_type(MFVideoFormat_H264, stream.width, stream.height, framerate)?;
         tf.set_input_type(&in_type)?;
